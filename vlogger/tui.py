@@ -83,13 +83,38 @@ class VLoggerTUI:
         curses.init_pair(8, curses.COLOR_MAGENTA, -1)  # Projects / tags
         curses.init_pair(9, curses.COLOR_WHITE, -1)    # Normal text
 
-    def _draw_box(self, stdscr, y: int, x: int, h: int, w: int, title: str = "", color_pair: int = 1):
-        """Draw a box with rounded corners and optional title."""
+        # Solid opaque modal pairs (using COLOR_BLACK background so underlying text never shines through)
+        curses.init_pair(10, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Modal interior / white on solid black
+        curses.init_pair(11, curses.COLOR_YELLOW, curses.COLOR_BLACK) # Modal highlight / title / border
+        curses.init_pair(12, curses.COLOR_RED, curses.COLOR_BLACK)    # Modal alert / delete
+        curses.init_pair(13, curses.COLOR_CYAN, curses.COLOR_BLACK)   # Modal info / accents
+
+    def _draw_box(
+        self,
+        stdscr,
+        y: int,
+        x: int,
+        h: int,
+        w: int,
+        title: str = "",
+        color_pair: int = 1,
+        fill: bool = False,
+        fill_pair: Optional[int] = None,
+    ):
+        """Draw a box with rounded corners, optional title, and optional solid fill."""
         if h < 2 or w < 2:
             return
         
         attr = curses.color_pair(color_pair)
+        fill_attr = curses.color_pair(fill_pair) if fill_pair is not None else attr
+
         try:
+            # If fill requested, erase/fill the entire rectangular area inside the box
+            if fill:
+                blank_row = " " * (w - 2)
+                for i in range(1, h - 1):
+                    stdscr.addstr(y + i, x + 1, blank_row, fill_attr)
+
             # Draw corners
             stdscr.addstr(y, x, "╭", attr)
             stdscr.addstr(y, x + w - 1, "╮", attr)
@@ -389,7 +414,17 @@ class VLoggerTUI:
         modal_y = (max_y - modal_h) // 2
         modal_x = (max_x - modal_w) // 2
 
-        self._draw_box(stdscr, modal_y, modal_x, modal_h, modal_w, title="Help & Vim Bindings", color_pair=4)
+        self._draw_box(
+            stdscr,
+            modal_y,
+            modal_x,
+            modal_h,
+            modal_w,
+            title="Help & Vim Bindings",
+            color_pair=11,
+            fill=True,
+            fill_pair=10,
+        )
 
         lines = [
             ("s or Space", "Toggle Start / Stop timer"),
@@ -408,11 +443,11 @@ class VLoggerTUI:
         try:
             for i, (key, desc) in enumerate(lines[:modal_h - 4]):
                 row_y = modal_y + 2 + i
-                stdscr.addstr(row_y, modal_x + 3, f"{key:<15}", curses.color_pair(4) | curses.A_BOLD)
-                stdscr.addstr(row_y, modal_x + 19, desc[:modal_w - 22], curses.color_pair(9))
+                stdscr.addstr(row_y, modal_x + 3, f"{key:<15}", curses.color_pair(11) | curses.A_BOLD)
+                stdscr.addstr(row_y, modal_x + 19, desc[:modal_w - 22], curses.color_pair(10))
             
             hint = "Press Esc, Space, or q to close"
-            stdscr.addstr(modal_y + modal_h - 2, modal_x + (modal_w - len(hint)) // 2, hint, curses.color_pair(1) | curses.A_DIM)
+            stdscr.addstr(modal_y + modal_h - 2, modal_x + (modal_w - len(hint)) // 2, hint, curses.color_pair(13) | curses.A_DIM)
         except curses.error:
             pass
 
@@ -422,12 +457,22 @@ class VLoggerTUI:
         modal_y = (max_y - modal_h) // 2
         modal_x = (max_x - modal_w) // 2
 
-        self._draw_box(stdscr, modal_y, modal_x, modal_h, modal_w, title="Confirm Deletion", color_pair=3)
+        self._draw_box(
+            stdscr,
+            modal_y,
+            modal_x,
+            modal_h,
+            modal_w,
+            title="Confirm Deletion",
+            color_pair=12,
+            fill=True,
+            fill_pair=10,
+        )
         try:
             msg = f"Delete entry #{self.pending_delete_id}?"
-            stdscr.addstr(modal_y + 2, modal_x + (modal_w - len(msg)) // 2, msg, curses.color_pair(3) | curses.A_BOLD)
+            stdscr.addstr(modal_y + 2, modal_x + (modal_w - len(msg)) // 2, msg, curses.color_pair(12) | curses.A_BOLD)
             prompt = "Press 'y' to confirm, 'n' or Esc to cancel"
-            stdscr.addstr(modal_y + 4, modal_x + (modal_w - len(prompt)) // 2, prompt, curses.color_pair(9))
+            stdscr.addstr(modal_y + 4, modal_x + (modal_w - len(prompt)) // 2, prompt, curses.color_pair(10))
         except curses.error:
             pass
 
@@ -444,7 +489,9 @@ class VLoggerTUI:
             modal_h,
             modal_w,
             title=f"Edit Entry #{self.editing_entry_id}",
-            color_pair=4,
+            color_pair=11,
+            fill=True,
+            fill_pair=10,
         )
 
         label = "Description: "
@@ -456,8 +503,8 @@ class VLoggerTUI:
             display_text = display_text[-(field_w - 1):]
 
         try:
-            stdscr.addstr(modal_y + 2, modal_x + 3, label, curses.color_pair(9) | curses.A_BOLD)
-            field_attr = curses.color_pair(7)  # Highlighted background
+            stdscr.addstr(modal_y + 2, modal_x + 3, label, curses.color_pair(10) | curses.A_BOLD)
+            field_attr = curses.color_pair(7)  # Highlighted cyan background
             padded_text = display_text.ljust(field_w)
             stdscr.addstr(modal_y + 2, field_x, padded_text[:field_w], field_attr)
 
@@ -467,7 +514,7 @@ class VLoggerTUI:
             stdscr.addch(modal_y + 2, cursor_disp_x, char_under, curses.A_REVERSE | curses.A_BLINK)
 
             hints = "Enter: Save changes  |  Esc: Cancel  |  Ctrl-u: Clear"
-            stdscr.addstr(modal_y + 5, modal_x + (modal_w - len(hints)) // 2, hints, curses.color_pair(9) | curses.A_DIM)
+            stdscr.addstr(modal_y + 5, modal_x + (modal_w - len(hints)) // 2, hints, curses.color_pair(10) | curses.A_DIM)
         except curses.error:
             pass
 
