@@ -1,0 +1,15 @@
+// ==============================================================================
+// VLOGGER WAYBAR MODULE CONFIGURATION
+// ==============================================================================
+// Add "custom/vlogger" to your Waybar modules list (modules-right, modules-center, etc.)
+// and paste this configuration block into your ~/.config/waybar/config or config.jsonc:
+// ==============================================================================
+
+"custom/vlogger": {
+    "format": "{}",
+    "exec": "vlogger status --waybar",
+    "return-type": "json",
+    "interval": 2,
+    "on-click": "vlogger toggle",
+    "on-click-right": "kitty --class vlogger -e vlogger"
+}

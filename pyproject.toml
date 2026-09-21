@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vlogger"
+version = "0.1.0"
+description = "A simple, keyboard-first work time-logger with Vim bindings, SQLite storage, and clean export."
+authors = [{ name = "pies" }]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+vlogger = "vlogger.cli:main"
