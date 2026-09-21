@@ -41,6 +41,9 @@ vlogger toggle "Deep Work"
 # Manually log past work
 vlogger add 45m "Code review" -p reviews
 
+# Edit / rename a past entry
+vlogger edit 4 "Refactored user authentication"
+
 # Export for external databases, pipelines, or spreadsheets
 vlogger export --format json --out work_logs.json
 vlogger export --format csv --out work_logs.csv
@@ -75,20 +78,21 @@ Run `vlogger` in any terminal (like Kitty):
 | Mode | Key | Action |
 | :--- | :--- | :--- |
 | **Normal** | `s` or `<Space>` | **Toggle Start / Stop** timer |
-| **Normal** | `i` or `a` or `e` | **Enter Insert Mode** to edit description field |
-| **Normal** | `d` | **Reset description** to configured default |
-| **Normal** | `D` | **Save current description** as the new default |
+| **Normal** | `i` or `a` | **Edit active tracker description** |
+| **Normal** | `e` or `<Enter>` | **Edit name of selected history entry** |
+| **Normal** | `d` | **Reset active description** to configured default |
+| **Normal** | `D` | **Save current active description** as the new default |
 | **Normal** | `j` / `k` (or `↓` / `↑`) | Scroll through history entries |
 | **Normal** | `g` / `G` | Jump to top / bottom of history |
 | **Normal** | `x` | Delete selected entry (prompts `y/n` confirmation) |
 | **Normal** | `r` | Reload/refresh data from SQLite |
 | **Normal** | `?` | Toggle help modal cheat sheet |
 | **Normal** | `q` | Quit TUI (*active timer keeps running in background!*) |
-| **Insert** | `<Enter>` | Accept description, update timer in DB, return to Normal mode |
-| **Insert** | `<Esc>` | Cancel edits, return to Normal mode |
-| **Insert** | `Ctrl-u` | Clear description field |
-| **Insert** | `Ctrl-w` | Delete previous word |
-| **Insert** | `Ctrl-a` / `Ctrl-e` | Move cursor to beginning / end of line |
+| **Insert / Edit** | `<Enter>` | Save changes and return to Normal mode |
+| **Insert / Edit** | `<Esc>` | Cancel edits, return to Normal mode |
+| **Insert / Edit** | `Ctrl-u` | Clear description field |
+| **Insert / Edit** | `Ctrl-w` | Delete previous word |
+| **Insert / Edit** | `Ctrl-a` / `Ctrl-e` | Move cursor to beginning / end of line |
 
 ---
 

@@ -22,7 +22,7 @@ class VLoggerTUI:
         self.core = VLoggerCore(self.db)
         
         # State
-        self.mode = "NORMAL"  # "NORMAL", "INSERT", "CONFIRM_DELETE", "HELP"
+        self.mode = "NORMAL"  # "NORMAL", "INSERT", "CONFIRM_DELETE", "HELP", "EDIT_HISTORY"
         self.default_desc = self.core.default_description
         self.desc_buffer = self.default_desc
         self.cursor_pos = len(self.desc_buffer)
@@ -32,6 +32,10 @@ class VLoggerTUI:
         self.entries: List[TimeEntry] = []
         self.active_entry: Optional[TimeEntry] = None
         
+        self.editing_entry_id: Optional[int] = None
+        self.edit_buffer: str = ""
+        self.edit_cursor_pos: int = 0
+
         self.status_message = "Ready. Press 's' to start/stop, 'i' to edit description, '?' for help."
         self.status_message_time = time.time()
         self.pending_delete_id: Optional[int] = None
@@ -140,6 +144,8 @@ class VLoggerTUI:
                 self._render_help_modal(stdscr, max_y, max_x)
             elif self.mode == "CONFIRM_DELETE":
                 self._render_confirm_delete_modal(stdscr, max_y, max_x)
+            elif self.mode == "EDIT_HISTORY":
+                self._render_edit_history_modal(stdscr, max_y, max_x)
 
             stdscr.refresh()
 
@@ -164,6 +170,10 @@ class VLoggerTUI:
                     self.pending_delete_id = None
                     self.set_status("Deletion cancelled.")
                     self.mode = "NORMAL"
+                continue
+
+            if self.mode == "EDIT_HISTORY":
+                self._handle_edit_history_key(ch)
                 continue
 
             if self.mode == "NORMAL":
@@ -356,8 +366,10 @@ class VLoggerTUI:
         # Short help hints based on mode
         if self.mode == "INSERT":
             hints = "Enter: Accept & Save | Esc: Cancel | Ctrl-u: Clear"
+        elif self.mode == "EDIT_HISTORY":
+            hints = "Enter: Save Changes | Esc: Cancel | Ctrl-u: Clear"
         else:
-            hints = "s: Start/Stop | i: Edit | d: Default | j/k: Nav | x: Del | ?: Help | q: Quit"
+            hints = "s: Start/Stop | i: Active Desc | e: Edit Past | j/k: Nav | x: Del | ?: Help | q: Quit"
 
         # Check if status message is still active
         if time.time() < self.status_message_time:
@@ -373,7 +385,7 @@ class VLoggerTUI:
 
     def _render_help_modal(self, stdscr, max_y: int, max_x: int):
         modal_w = min(68, max_x - 6)
-        modal_h = min(16, max_y - 4)
+        modal_h = 17
         modal_y = (max_y - modal_h) // 2
         modal_x = (max_x - modal_w) // 2
 
@@ -381,9 +393,10 @@ class VLoggerTUI:
 
         lines = [
             ("s or Space", "Toggle Start / Stop timer"),
-            ("i, a, or e", "Insert mode: Edit description input field"),
-            ("d", "Reset description to default ('" + self.default_desc + "')"),
-            ("D", "Save current input field as the new default"),
+            ("i or a", "Insert mode: Edit active tracker description"),
+            ("e or Enter", "Edit description of selected history entry"),
+            ("d", "Reset active description to default ('" + self.default_desc + "')"),
+            ("D", "Save current active description as new default"),
             ("j / k or ↓/↑", "Navigate history entries"),
             ("g / G", "Jump to top / bottom of history list"),
             ("x", "Delete selected history entry (with confirm)"),
@@ -418,6 +431,103 @@ class VLoggerTUI:
         except curses.error:
             pass
 
+    def _render_edit_history_modal(self, stdscr, max_y: int, max_x: int):
+        modal_w = min(68, max_x - 6)
+        modal_h = 8
+        modal_y = (max_y - modal_h) // 2
+        modal_x = (max_x - modal_w) // 2
+
+        self._draw_box(
+            stdscr,
+            modal_y,
+            modal_x,
+            modal_h,
+            modal_w,
+            title=f"Edit Entry #{self.editing_entry_id}",
+            color_pair=4,
+        )
+
+        label = "Description: "
+        field_x = modal_x + 3 + len(label)
+        field_w = max(10, modal_w - len(label) - 6)
+
+        display_text = self.edit_buffer
+        if len(display_text) > field_w:
+            display_text = display_text[-(field_w - 1):]
+
+        try:
+            stdscr.addstr(modal_y + 2, modal_x + 3, label, curses.color_pair(9) | curses.A_BOLD)
+            field_attr = curses.color_pair(7)  # Highlighted background
+            padded_text = display_text.ljust(field_w)
+            stdscr.addstr(modal_y + 2, field_x, padded_text[:field_w], field_attr)
+
+            # Draw cursor
+            cursor_disp_x = field_x + min(self.edit_cursor_pos, field_w - 1)
+            char_under = ' ' if self.edit_cursor_pos >= len(self.edit_buffer) else self.edit_buffer[self.edit_cursor_pos]
+            stdscr.addch(modal_y + 2, cursor_disp_x, char_under, curses.A_REVERSE | curses.A_BLINK)
+
+            hints = "Enter: Save changes  |  Esc: Cancel  |  Ctrl-u: Clear"
+            stdscr.addstr(modal_y + 5, modal_x + (modal_w - len(hints)) // 2, hints, curses.color_pair(9) | curses.A_DIM)
+        except curses.error:
+            pass
+
+    def _handle_edit_history_key(self, ch: int):
+        if ch in (27,):  # Escape
+            self.mode = "NORMAL"
+            self.set_status("Edit cancelled.")
+            return
+
+        elif ch in (10, 13, curses.KEY_ENTER):  # Enter key
+            new_desc = self.edit_buffer.strip()
+            if new_desc and self.editing_entry_id:
+                self.db.update_entry(self.editing_entry_id, description=new_desc)
+                self.set_status(f"Updated entry #{self.editing_entry_id}: '{new_desc}'")
+            self.mode = "NORMAL"
+            self.refresh_data()
+            return
+
+        elif ch in (curses.KEY_BACKSPACE, 127, 8):
+            if self.edit_cursor_pos > 0:
+                self.edit_buffer = self.edit_buffer[:self.edit_cursor_pos - 1] + self.edit_buffer[self.edit_cursor_pos:]
+                self.edit_cursor_pos -= 1
+
+        elif ch == curses.KEY_DC:
+            if self.edit_cursor_pos < len(self.edit_buffer):
+                self.edit_buffer = self.edit_buffer[:self.edit_cursor_pos] + self.edit_buffer[self.edit_cursor_pos + 1:]
+
+        elif ch == curses.KEY_LEFT:
+            if self.edit_cursor_pos > 0:
+                self.edit_cursor_pos -= 1
+
+        elif ch == curses.KEY_RIGHT:
+            if self.edit_cursor_pos < len(self.edit_buffer):
+                self.edit_cursor_pos += 1
+
+        elif ch in (curses.KEY_HOME, 1):  # Ctrl-A or Home
+            self.edit_cursor_pos = 0
+
+        elif ch in (curses.KEY_END, 5):  # Ctrl-E or End
+            self.edit_cursor_pos = len(self.edit_buffer)
+
+        elif ch == 21:  # Ctrl-U (clear line)
+            self.edit_buffer = ""
+            self.edit_cursor_pos = 0
+
+        elif ch == 23:  # Ctrl-W (delete word backward)
+            left = self.edit_buffer[:self.edit_cursor_pos].rstrip()
+            idx = left.rfind(' ')
+            if idx == -1:
+                self.edit_buffer = self.edit_buffer[self.edit_cursor_pos:]
+                self.edit_cursor_pos = 0
+            else:
+                self.edit_buffer = left[:idx + 1] + self.edit_buffer[self.edit_cursor_pos:]
+                self.edit_cursor_pos = idx + 1
+
+        elif 32 <= ch <= 126:  # Printable character
+            char = chr(ch)
+            self.edit_buffer = self.edit_buffer[:self.edit_cursor_pos] + char + self.edit_buffer[self.edit_cursor_pos:]
+            self.edit_cursor_pos += 1
+
     def _handle_normal_key(self, ch: int) -> bool:
         """Returns False if quit requested."""
         if ch in (ord('q'), ord('Q')):
@@ -433,9 +543,17 @@ class VLoggerTUI:
                 started = self.core.start(description=desc)
                 self.set_status(f"Started: '{started.description}'")
 
-        elif ch in (ord('i'), ord('I'), ord('a'), ord('A'), ord('e')):
+        elif ch in (ord('i'), ord('I'), ord('a'), ord('A')):
             self.mode = "INSERT"
             self.cursor_pos = len(self.desc_buffer)
+
+        elif ch in (ord('e'), ord('E'), ord('c'), 10, 13, curses.KEY_ENTER):
+            if self.entries and 0 <= self.selected_idx < len(self.entries):
+                target = self.entries[self.selected_idx]
+                self.editing_entry_id = target.id
+                self.edit_buffer = target.description
+                self.edit_cursor_pos = len(self.edit_buffer)
+                self.mode = "EDIT_HISTORY"
 
         elif ch == ord('d'):  # Reset to default description
             self.desc_buffer = self.default_desc

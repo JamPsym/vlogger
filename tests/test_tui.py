@@ -96,6 +96,32 @@ class TestTUI(unittest.TestCase):
         self.assertEqual(self.tui.mode, "CONFIRM_DELETE")
         self.assertIsNotNone(self.tui.pending_delete_id)
 
+    def test_edit_history_entry(self):
+        e1 = self.db.add_manual_entry("Initial Name", 300)
+        self.tui.refresh_data()
+        self.assertEqual(len(self.tui.entries), 1)
+
+        # Press 'e' on the entry to enter EDIT_HISTORY mode
+        self.tui._handle_normal_key(ord('e'))
+        self.assertEqual(self.tui.mode, "EDIT_HISTORY")
+        self.assertEqual(self.tui.editing_entry_id, e1.id)
+        self.assertEqual(self.tui.edit_buffer, "Initial Name")
+
+        # Clear buffer with Ctrl-U (21) and type new description
+        self.tui._handle_edit_history_key(21)
+        self.assertEqual(self.tui.edit_buffer, "")
+        for ch in "Renamed Task":
+            self.tui._handle_edit_history_key(ord(ch))
+        self.assertEqual(self.tui.edit_buffer, "Renamed Task")
+
+        # Press Enter (10) to save
+        self.tui._handle_edit_history_key(10)
+        self.assertEqual(self.tui.mode, "NORMAL")
+
+        # Verify DB updated
+        updated = self.db.get_entry(e1.id)
+        self.assertEqual(updated.description, "Renamed Task")
+
     def test_quit_key(self):
         keep_running = self.tui._handle_normal_key(ord('q'))
         self.assertFalse(keep_running)

@@ -95,6 +95,11 @@ def main():
     p_export.add_argument("--until", help="Filter until ISO date/time")
     p_export.add_argument("-p", "--project", help="Filter by project")
 
+    # Edit / Rename
+    p_edit = subparsers.add_parser("edit", aliases=["rename"], help="Edit description of an existing entry")
+    p_edit.add_argument("id", type=int, help="Entry ID to edit (e.g. 1)")
+    p_edit.add_argument("description", nargs="?", help="New description (prompts if omitted)")
+
     # Config
     p_config = subparsers.add_parser("config", help="Get or set configuration values")
     p_config.add_argument("action", choices=["get", "set", "list"], help="Action to perform")
@@ -191,6 +196,25 @@ def main():
                 project=args.project,
             )
             print(output, end="")
+
+    elif args.command in ("edit", "rename"):
+        entry = db.get_entry(args.id)
+        if not entry:
+            print(f"Error: Entry #{args.id} not found.")
+            sys.exit(1)
+        new_desc = args.description
+        if not new_desc:
+            print(f"Current description: '{entry.description}'")
+            try:
+                new_desc = input("New description: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nCancelled.")
+                sys.exit(0)
+        if not new_desc:
+            print("Description cannot be empty.")
+            sys.exit(1)
+        updated = db.update_entry(args.id, description=new_desc)
+        print(f"Updated entry #{updated.id}: '{updated.description}'")
 
     elif args.command == "config":
         if args.action == "list":
