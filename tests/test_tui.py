@@ -122,6 +122,46 @@ class TestTUI(unittest.TestCase):
         updated = self.db.get_entry(e1.id)
         self.assertEqual(updated.description, "Renamed Task")
 
+    def test_pick_past_description_modal(self):
+        from datetime import datetime
+        t1 = datetime(2026, 9, 21, 9, 0, 0)
+        t2 = datetime(2026, 9, 21, 10, 0, 0)
+        self.db.add_manual_entry("Task Alpha", 100, start_dt=t1)
+        self.db.add_manual_entry("Task Beta", 100, start_dt=t2)
+        self.tui.refresh_data()
+
+        # Press 'p' to open PICK_DESC
+        self.tui._handle_normal_key(ord('p'))
+        self.assertEqual(self.tui.mode, "PICK_DESC")
+        self.assertEqual(len(self.tui.desc_options), 2)
+        self.assertEqual(self.tui.desc_options[0]["description"], "Task Beta")  # Most recent first
+
+        # Move to second item with 'j'
+        self.tui._handle_pick_desc_key(ord('j'))
+        self.assertEqual(self.tui.pick_idx, 1)
+
+        # Press Enter to select
+        self.tui._handle_pick_desc_key(10)
+        self.assertEqual(self.tui.mode, "NORMAL")
+        self.assertEqual(self.tui.desc_buffer, "Task Alpha")
+
+    def test_yank_description_from_history(self):
+        from datetime import datetime
+        t1 = datetime(2026, 9, 21, 9, 0, 0)
+        t2 = datetime(2026, 9, 21, 10, 0, 0)
+        e1 = self.db.add_manual_entry("History Task 1", 100, start_dt=t1)
+        e2 = self.db.add_manual_entry("History Task 2", 100, start_dt=t2)
+        self.tui.refresh_data()
+
+        # In list_entries (start_time DESC), index 0 is Task 2, index 1 is Task 1
+        # Move down to History Task 1 with 'j'
+        self.tui._handle_normal_key(ord('j'))
+        self.assertEqual(self.tui.selected_idx, 1)
+
+        # Press 'y' to yank into active description
+        self.tui._handle_normal_key(ord('y'))
+        self.assertEqual(self.tui.desc_buffer, "History Task 1")
+
     def test_quit_key(self):
         keep_running = self.tui._handle_normal_key(ord('q'))
         self.assertFalse(keep_running)

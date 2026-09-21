@@ -42,12 +42,14 @@ class TestCore(unittest.TestCase):
 
     def test_default_description_setting(self):
         self.assertEqual(self.core.default_description, "Work")
-        self.core.default_description = "Writing Code"
-        self.assertEqual(self.core.default_description, "Writing Code")
+        
+        # When an entry is added, default_description becomes that entry's description
+        self.db.add_manual_entry("Sprint Review", 1800)
+        self.assertEqual(self.core.default_description, "Sprint Review")
 
-        # Start timer without explicit description uses default
+        # Explicit start uses that default
         entry = self.core.start()
-        self.assertEqual(entry.description, "Writing Code")
+        self.assertEqual(entry.description, "Sprint Review")
 
     def test_toggle_logic(self):
         # 1. First toggle should start

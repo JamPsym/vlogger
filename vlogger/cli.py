@@ -100,6 +100,9 @@ def main():
     p_edit.add_argument("id", type=int, help="Entry ID to edit (e.g. 1)")
     p_edit.add_argument("description", nargs="?", help="New description (prompts if omitted)")
 
+    # Tasks / Descriptions list
+    subparsers.add_parser("tasks", aliases=["descriptions"], help="List unique past task descriptions")
+
     # Config
     p_config = subparsers.add_parser("config", help="Get or set configuration values")
     p_config.add_argument("action", choices=["get", "set", "list"], help="Action to perform")
@@ -215,6 +218,18 @@ def main():
             sys.exit(1)
         updated = db.update_entry(args.id, description=new_desc)
         print(f"Updated entry #{updated.id}: '{updated.description}'")
+
+    elif args.command in ("tasks", "descriptions"):
+        items = core.get_unique_descriptions()
+        if not items:
+            print("No past tasks recorded yet.")
+        else:
+            print(f"{'COUNT':<7} {'LAST USED':<18} {'DESCRIPTION'}")
+            print("-" * 65)
+            for it in items:
+                cnt = f"{it['count']}x"
+                last_u = it['last_used'][:16] if it['last_used'] else "-"
+                print(f"{cnt:<7} {last_u:<18} {it['description']}")
 
     elif args.command == "config":
         if args.action == "list":

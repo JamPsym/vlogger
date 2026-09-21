@@ -79,15 +79,18 @@ Run `vlogger` in any terminal (like Kitty):
 | :--- | :--- | :--- |
 | **Normal** | `s` or `<Space>` | **Toggle Start / Stop** timer |
 | **Normal** | `i` or `a` | **Edit active tracker description** |
+| **Normal** | `p` | **Pick from list of unique past tasks** (prevents duplicate typos) |
+| **Normal** | `y` | **Yank (copy)** selected history entry to active tracker |
 | **Normal** | `e` or `<Enter>` | **Edit name of selected history entry** |
-| **Normal** | `d` | **Reset active description** to configured default |
-| **Normal** | `D` | **Save current active description** as the new default |
+| **Normal** | `d` | **Reset active description** to the last used task |
+| **Normal** | `D` | **Save current active description** as the new fallback default |
 | **Normal** | `j` / `k` (or `↓` / `↑`) | Scroll through history entries |
 | **Normal** | `g` / `G` | Jump to top / bottom of history |
 | **Normal** | `x` | Delete selected entry (prompts `y/n` confirmation) |
 | **Normal** | `r` | Reload/refresh data from SQLite |
 | **Normal** | `?` | Toggle help modal cheat sheet |
 | **Normal** | `q` | Quit TUI (*active timer keeps running in background!*) |
+| **Insert** | `<Tab>` or `Ctrl-p` | **Open pick list** while typing |
 | **Insert / Edit** | `<Enter>` | Save changes and return to Normal mode |
 | **Insert / Edit** | `<Esc>` | Cancel edits, return to Normal mode |
 | **Insert / Edit** | `Ctrl-u` | Clear description field |

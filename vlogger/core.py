@@ -48,11 +48,17 @@ class VLoggerCore:
 
     @property
     def default_description(self) -> str:
+        last = self.db.get_last_description()
+        if last:
+            return last
         return self.db.get_setting("default_description", "Work")
 
     @default_description.setter
     def default_description(self, val: str) -> None:
         self.db.set_setting("default_description", val.strip())
+
+    def get_unique_descriptions(self, limit: int = 50) -> List[Dict[str, Any]]:
+        return self.db.get_recent_descriptions(limit=limit)
 
     def start(
         self,

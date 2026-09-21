@@ -36,7 +36,11 @@ class VLoggerTUI:
         self.edit_buffer: str = ""
         self.edit_cursor_pos: int = 0
 
-        self.status_message = "Ready. Press 's' to start/stop, 'i' to edit description, '?' for help."
+        self.desc_options: List[dict] = []
+        self.pick_idx: int = 0
+        self.pick_offset: int = 0
+
+        self.status_message = "Ready. Press 's' to start/stop, 'p' to pick past task, 'i' to edit, '?' for help."
         self.status_message_time = time.time()
         self.pending_delete_id: Optional[int] = None
 
@@ -51,8 +55,11 @@ class VLoggerTUI:
         self.default_desc = self.core.default_description
         
         # If active entry exists and we are not currently editing, reflect its description
-        if self.active_entry and self.mode != "INSERT":
+        if self.active_entry and self.mode not in ("INSERT", "PICK_DESC"):
             self.desc_buffer = self.active_entry.description
+            self.cursor_pos = len(self.desc_buffer)
+        elif not self.active_entry and self.mode == "NORMAL" and not self.desc_buffer:
+            self.desc_buffer = self.default_desc
             self.cursor_pos = len(self.desc_buffer)
 
     def run(self):
@@ -171,6 +178,8 @@ class VLoggerTUI:
                 self._render_confirm_delete_modal(stdscr, max_y, max_x)
             elif self.mode == "EDIT_HISTORY":
                 self._render_edit_history_modal(stdscr, max_y, max_x)
+            elif self.mode == "PICK_DESC":
+                self._render_pick_desc_modal(stdscr, max_y, max_x)
 
             stdscr.refresh()
 
@@ -199,6 +208,10 @@ class VLoggerTUI:
 
             if self.mode == "EDIT_HISTORY":
                 self._handle_edit_history_key(ch)
+                continue
+
+            if self.mode == "PICK_DESC":
+                self._handle_pick_desc_key(ch)
                 continue
 
             if self.mode == "NORMAL":
@@ -284,20 +297,21 @@ class VLoggerTUI:
                 start_btn = " [s: START] "
                 stdscr.addstr(btn_y, box_x + 3, start_btn, curses.color_pair(5) | curses.A_BOLD)
 
-            btn_edit = " [i: Edit Desc] "
-            btn_def = f" [d: Reset Default] "
-            btn_save_def = f" [D: Save as Default] "
+            btn_edit = " [i: Edit] "
+            btn_pick = " [p: Pick Past] "
+            btn_def = f" [d: Last Desc] "
 
             curr_bx = box_x + 18
             stdscr.addstr(btn_y, curr_bx, btn_edit, curses.color_pair(1) | curses.A_BOLD)
             curr_bx += len(btn_edit) + 1
 
+            if curr_bx + len(btn_pick) < box_x + box_w - 2:
+                stdscr.addstr(btn_y, curr_bx, btn_pick, curses.color_pair(4) | curses.A_BOLD)
+                curr_bx += len(btn_pick) + 1
+
             if curr_bx + len(btn_def) < box_x + box_w - 2:
                 stdscr.addstr(btn_y, curr_bx, btn_def, curses.color_pair(9))
                 curr_bx += len(btn_def) + 1
-
-            if curr_bx + len(btn_save_def) < box_x + box_w - 2:
-                stdscr.addstr(btn_y, curr_bx, btn_save_def, curses.color_pair(9))
         except curses.error:
             pass
 
@@ -390,11 +404,13 @@ class VLoggerTUI:
 
         # Short help hints based on mode
         if self.mode == "INSERT":
-            hints = "Enter: Accept & Save | Esc: Cancel | Ctrl-u: Clear"
+            hints = "Enter: Accept & Save | Esc: Cancel | Tab: Pick Past | Ctrl-u: Clear"
         elif self.mode == "EDIT_HISTORY":
             hints = "Enter: Save Changes | Esc: Cancel | Ctrl-u: Clear"
+        elif self.mode == "PICK_DESC":
+            hints = "Enter: Choose Task | j/k or ↓/↑: Nav | Esc: Cancel"
         else:
-            hints = "s: Start/Stop | i: Active Desc | e: Edit Past | j/k: Nav | x: Del | ?: Help | q: Quit"
+            hints = "s: Start/Stop | i: Edit | p: Pick Past | y: Yank | e: Rename | d: Last | ?: Help | q: Quit"
 
         # Check if status message is still active
         if time.time() < self.status_message_time:
@@ -410,7 +426,7 @@ class VLoggerTUI:
 
     def _render_help_modal(self, stdscr, max_y: int, max_x: int):
         modal_w = min(68, max_x - 6)
-        modal_h = 17
+        modal_h = 18
         modal_y = (max_y - modal_h) // 2
         modal_x = (max_x - modal_w) // 2
 
@@ -429,8 +445,10 @@ class VLoggerTUI:
         lines = [
             ("s or Space", "Toggle Start / Stop timer"),
             ("i or a", "Insert mode: Edit active tracker description"),
-            ("e or Enter", "Edit description of selected history entry"),
-            ("d", "Reset active description to default ('" + self.default_desc + "')"),
+            ("p", "Pick from list of unique past tasks"),
+            ("y", "Yank highlighted history task to active tracker"),
+            ("e or Enter", "Edit / rename selected history entry"),
+            ("d", "Reset active description to last used task"),
             ("D", "Save current active description as new default"),
             ("j / k or ↓/↑", "Navigate history entries"),
             ("g / G", "Jump to top / bottom of history list"),
@@ -575,6 +593,100 @@ class VLoggerTUI:
             self.edit_buffer = self.edit_buffer[:self.edit_cursor_pos] + char + self.edit_buffer[self.edit_cursor_pos:]
             self.edit_cursor_pos += 1
 
+    def _render_pick_desc_modal(self, stdscr, max_y: int, max_x: int):
+        modal_w = min(68, max_x - 6)
+        modal_h = min(14, max_y - 4)
+        modal_y = (max_y - modal_h) // 2
+        modal_x = (max_x - modal_w) // 2
+
+        self._draw_box(
+            stdscr,
+            modal_y,
+            modal_x,
+            modal_h,
+            modal_w,
+            title="Choose From Past Tasks",
+            color_pair=11,
+            fill=True,
+            fill_pair=10,
+        )
+
+        visible_rows = modal_h - 4
+        if not self.desc_options:
+            try:
+                stdscr.addstr(modal_y + 2, modal_x + 3, "No past tasks recorded yet.", curses.color_pair(10))
+            except curses.error:
+                pass
+            return
+
+        # Adjust scrolling
+        if self.pick_idx < self.pick_offset:
+            self.pick_offset = self.pick_idx
+        elif self.pick_idx >= self.pick_offset + visible_rows:
+            self.pick_offset = self.pick_idx - visible_rows + 1
+
+        try:
+            for row_i in range(visible_rows):
+                opt_idx = self.pick_offset + row_i
+                if opt_idx >= len(self.desc_options):
+                    break
+
+                item = self.desc_options[opt_idx]
+                is_sel = (opt_idx == self.pick_idx)
+                prefix = "> " if is_sel else "  "
+                count_str = f"({item['count']}x)"
+
+                # Format text
+                max_text_w = max(5, modal_w - 6 - len(count_str) - len(prefix))
+                desc_text = item["description"]
+                if len(desc_text) > max_text_w:
+                    desc_text = desc_text[:max_text_w - 1] + "…"
+
+                line_str = f"{prefix}{desc_text:<{max_text_w}} {count_str}"
+                row_y = modal_y + 2 + row_i
+                attr = curses.color_pair(7) | curses.A_BOLD if is_sel else curses.color_pair(10)
+
+                stdscr.addstr(row_y, modal_x + 2, line_str[:modal_w - 4].ljust(modal_w - 4), attr)
+
+            hints = "Enter: Choose  |  j/k or ↓/↑: Nav  |  Esc: Cancel"
+            stdscr.addstr(modal_y + modal_h - 2, modal_x + (modal_w - len(hints)) // 2, hints, curses.color_pair(13) | curses.A_DIM)
+        except curses.error:
+            pass
+
+    def _handle_pick_desc_key(self, ch: int):
+        if ch in (27, ord('q'), ord('Q')):  # Escape or q
+            self.mode = "NORMAL"
+            self.set_status("Selection cancelled.")
+            return
+
+        elif ch in (ord('j'), curses.KEY_DOWN):
+            if self.desc_options and self.pick_idx < len(self.desc_options) - 1:
+                self.pick_idx += 1
+
+        elif ch in (ord('k'), curses.KEY_UP):
+            if self.pick_idx > 0:
+                self.pick_idx -= 1
+
+        elif ch in (ord('g'), curses.KEY_HOME):
+            self.pick_idx = 0
+
+        elif ch in (ord('G'), curses.KEY_END):
+            if self.desc_options:
+                self.pick_idx = len(self.desc_options) - 1
+
+        elif ch in (10, 13, curses.KEY_ENTER, ord(' ')):
+            if self.desc_options and 0 <= self.pick_idx < len(self.desc_options):
+                chosen = self.desc_options[self.pick_idx]["description"]
+                self.desc_buffer = chosen
+                self.cursor_pos = len(self.desc_buffer)
+                if self.active_entry:
+                    self.db.update_entry(self.active_entry.id, description=chosen)
+                    self.set_status(f"Updated active task description to: '{chosen}'")
+                else:
+                    self.set_status(f"Selected task: '{chosen}'. Press 's' to start.")
+            self.mode = "NORMAL"
+            self.refresh_data()
+
     def _handle_normal_key(self, ch: int) -> bool:
         """Returns False if quit requested."""
         if ch in (ord('q'), ord('Q')):
@@ -594,6 +706,26 @@ class VLoggerTUI:
             self.mode = "INSERT"
             self.cursor_pos = len(self.desc_buffer)
 
+        elif ch in (ord('p'), ord('P')):
+            self.desc_options = self.core.get_unique_descriptions()
+            if not self.desc_options:
+                self.set_status("No past tasks recorded yet.")
+            else:
+                self.pick_idx = 0
+                self.pick_offset = 0
+                self.mode = "PICK_DESC"
+
+        elif ch in (ord('y'), ord('Y')):
+            if self.entries and 0 <= self.selected_idx < len(self.entries):
+                chosen = self.entries[self.selected_idx].description
+                self.desc_buffer = chosen
+                self.cursor_pos = len(self.desc_buffer)
+                if self.active_entry:
+                    self.db.update_entry(self.active_entry.id, description=chosen)
+                    self.set_status(f"Yanked to active task: '{chosen}'")
+                else:
+                    self.set_status(f"Yanked description: '{chosen}'")
+
         elif ch in (ord('e'), ord('E'), ord('c'), 10, 13, curses.KEY_ENTER):
             if self.entries and 0 <= self.selected_idx < len(self.entries):
                 target = self.entries[self.selected_idx]
@@ -602,10 +734,10 @@ class VLoggerTUI:
                 self.edit_cursor_pos = len(self.edit_buffer)
                 self.mode = "EDIT_HISTORY"
 
-        elif ch == ord('d'):  # Reset to default description
+        elif ch == ord('d'):  # Reset to default description (last used)
             self.desc_buffer = self.default_desc
             self.cursor_pos = len(self.desc_buffer)
-            self.set_status(f"Reset description to default: '{self.default_desc}'")
+            self.set_status(f"Reset description to: '{self.default_desc}'")
 
         elif ch == ord('D'):  # Set current as default description
             new_def = self.desc_buffer.strip()
@@ -647,6 +779,14 @@ class VLoggerTUI:
     def _handle_insert_key(self, ch: int):
         if ch in (27,):  # Escape key
             self.mode = "NORMAL"
+            return
+
+        elif ch in (9, 16):  # Tab (9) or Ctrl-P (16) to open pick list
+            self.desc_options = self.core.get_unique_descriptions()
+            if self.desc_options:
+                self.pick_idx = 0
+                self.pick_offset = 0
+                self.mode = "PICK_DESC"
             return
 
         elif ch in (10, 13, curses.KEY_ENTER):  # Enter key

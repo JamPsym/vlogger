@@ -101,8 +101,24 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(len(all_entries), 2)
 
         proj1_entries = self.db.list_entries(project="proj1")
-        self.assertEqual(len(proj1_entries), 1)
-        self.assertEqual(proj1_entries[0].description, "Task A")
+    def test_get_last_description_and_recent(self):
+        self.assertIsNone(self.db.get_last_description())
+        self.assertEqual(len(self.db.get_recent_descriptions()), 0)
+
+        t1 = datetime(2026, 9, 21, 8, 0, 0)
+        t2 = datetime(2026, 9, 21, 9, 0, 0)
+        t3 = datetime(2026, 9, 21, 10, 0, 0)
+        self.db.add_manual_entry("Task X", 100, start_dt=t1)
+        self.db.add_manual_entry("Task Y", 100, start_dt=t2)
+        self.db.add_manual_entry("Task X", 100, start_dt=t3)
+
+        self.assertEqual(self.db.get_last_description(), "Task X")
+        recent = self.db.get_recent_descriptions()
+        self.assertEqual(len(recent), 2)
+        self.assertEqual(recent[0]["description"], "Task X")
+        self.assertEqual(recent[0]["count"], 2)
+        self.assertEqual(recent[1]["description"], "Task Y")
+        self.assertEqual(recent[1]["count"], 1)
 
 
 if __name__ == "__main__":

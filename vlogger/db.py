@@ -317,3 +317,38 @@ class Database:
             "count": len(entries),
             "date": today_prefix,
         }
+
+    def get_last_description(self) -> Optional[str]:
+        """Return the description of the most recent entry."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT description FROM entries
+                WHERE trim(description) != ''
+                ORDER BY start_time DESC LIMIT 1
+            """)
+            row = cur.fetchone()
+            return row["description"] if row else None
+
+    def get_recent_descriptions(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return unique descriptions ordered by most recent use, with usage count."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT description, MAX(start_time) as last_used, COUNT(*) as count
+                FROM entries
+                WHERE trim(description) != ''
+                GROUP BY description
+                ORDER BY MAX(start_time) DESC
+                LIMIT ?
+            """, (limit,))
+            rows = cur.fetchall()
+            return [
+                {
+                    "description": r["description"],
+                    "count": r["count"],
+                    "last_used": r["last_used"],
+                }
+                for r in rows
+            ]
+
