@@ -45,6 +45,16 @@ def format_table(entries, today_stats):
     return "\n".join(lines)
 
 
+def _pretty_path(path: Path) -> str:
+    """Format path with ~ for user home directory to avoid exposing internal username in output."""
+    try:
+        home = Path.home()
+        rel = path.relative_to(home)
+        return f"~/{rel}"
+    except (ValueError, RuntimeError):
+        return str(path)
+
+
 def format_daily_stats_table(days, summary):
     if not days or (len(days) == 1 and days[0]["count"] == 0):
         return "No work logs recorded yet. Track some time with 'vlogger start' or 'vlogger add'."
@@ -478,7 +488,7 @@ def main():
             from vlogger.html_report import write_html_report
             target_path = Path(args.out).expanduser().resolve() if args.out else core.html_report_path
             written = write_html_report(db, file_path=target_path)
-            print(f"Generated static HTML progress report at: {written}")
+            print(f"Generated static HTML progress report at: {_pretty_path(written)}")
             ok, msg = core.sync_html_report(written, wait=True)
             if ok and "No 'html_sync_cmd'" not in msg:
                 print(f"✓ {msg}")
@@ -492,7 +502,7 @@ def main():
         from vlogger.html_report import write_html_report
         target_path = Path(args.out).expanduser().resolve() if args.out else core.html_report_path
         written = write_html_report(db, file_path=target_path)
-        print(f"Generated static HTML report at: {written}")
+        print(f"Generated static HTML report at: {_pretty_path(written)}")
         ok, msg = core.sync_html_report(written, wait=True)
         if ok:
             print(f"✓ {msg}")
