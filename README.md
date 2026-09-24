@@ -108,7 +108,8 @@ Press **`<Tab>`**, **`v`**, or **`1`** / **`2`** / **`3`** / **`4`** to switch b
 
 | Mode | Key | Action |
 | :--- | :--- | :--- |
-| **Normal** | `<Tab>` or `v` | **Cycle through Views** (Logs → Daily → Weekly → Monthly) |
+| **Normal** | `h` / `l` (or `←` / `→`) | **Switch Views left / right** (Logs ↔ Daily ↔ Weekly ↔ Monthly) |
+| **Normal** | `<Tab>` / `v` (or `<Shift-Tab>`) | **Cycle Views forward / backward** |
 | **Normal** | `1` / `2` / `3` / `4` | **Switch directly** to Logs (`1`), Daily (`2`), Weekly (`3`), or Monthly (`4`) view |
 | **Normal** | `s` or `<Space>` | **Toggle Start / Stop** timer (runs across all views) |
 | **Normal** | `i` or `a` | **Edit active tracker description** |

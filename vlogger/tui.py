@@ -1028,9 +1028,9 @@ class VLoggerTUI:
             hints = "Esc / Enter / q: Close | j/k or ↓/↑: Scroll"
         else:
             if self.view == "LOGS":
-                hints = "Tab/v: Switch view (1-4) | s: Start/Stop | i: Edit | p: Pick | y: Yank | e: Rename | ?: Help | q: Quit"
+                hints = "h/l: Switch Views | s: Start/Stop | i: Edit | p: Pick | y: Yank | e: Rename | ?: Help | q: Quit"
             else:
-                hints = "Tab/v: Switch view (1-4) | Enter: View Details | j/k: Nav | y: Yank | s: Start/Stop | ?: Help | q: Quit"
+                hints = "h/l: Switch Views | Enter: View Details | j/k: Nav | y: Yank | s: Start/Stop | ?: Help | q: Quit"
 
         # Check if status message is still active
         if time.time() < self.status_message_time:
@@ -1063,7 +1063,9 @@ class VLoggerTUI:
         )
 
         lines = [
-            ("Tab or v", "Cycle through Views (Logs, Daily, Weekly, Monthly)"),
+            ("h / l or ←/→", "Switch views left / right (Logs, Daily, Weekly, Monthly)"),
+            ("Tab or v", "Cycle forward through Views"),
+            ("Shift-Tab", "Cycle backward through Views"),
             ("1 / 2 / 3 / 4", "Switch view directly (Logs, Daily, Weekly, Monthly)"),
             ("s or Space", "Toggle Start / Stop timer"),
             ("i or a", "Insert mode: Edit active tracker description"),
@@ -1072,7 +1074,7 @@ class VLoggerTUI:
             ("e or Enter", "Edit selected log entry / View period details"),
             ("d", "Reset active description to last used task"),
             ("D", "Save current active description as new default"),
-            ("j / k or ↓/↑", "Navigate history entries or daily stats"),
+            ("j / k or ↓/↑", "Navigate history entries or summary statistics"),
             ("g / G", "Jump to top / bottom of current list"),
             ("x", "Delete selected history entry (with confirm)"),
             ("r", "Refresh data from database"),
@@ -1312,6 +1314,7 @@ class VLoggerTUI:
     def _handle_normal_key(self, ch: int) -> bool:
         """Returns False if quit requested."""
         if ch in (ord('q'), ord('Q')):
+            self.core.wait_for_sync(timeout=3.0)
             return False
 
         elif ch in (ord('s'), ord(' ')):  # Toggle Start / Stop
@@ -1324,10 +1327,17 @@ class VLoggerTUI:
                 started = self.core.start(description=desc)
                 self.set_status(f"Started: '{started.description}'")
 
-        elif ch in (ord('\t'), ord('v'), ord('V')):
+        elif ch in (ord('\t'), ord('v'), ord('V'), ord('l'), ord('L'), curses.KEY_RIGHT):
             order = ["LOGS", "STATS", "WEEKLY", "MONTHLY"]
             cur_i = order.index(self.view) if self.view in order else 0
             self.view = order[(cur_i + 1) % len(order)]
+            names = {"LOGS": "Recent Logs", "STATS": "Daily Stats", "WEEKLY": "Weekly Stats", "MONTHLY": "Monthly Stats"}
+            self.set_status(f"Switched to {names.get(self.view, self.view)} view.")
+
+        elif ch in (ord('h'), ord('H'), curses.KEY_LEFT, getattr(curses, 'KEY_BTAB', 353)):
+            order = ["LOGS", "STATS", "WEEKLY", "MONTHLY"]
+            cur_i = order.index(self.view) if self.view in order else 0
+            self.view = order[(cur_i - 1 + len(order)) % len(order)]
             names = {"LOGS": "Recent Logs", "STATS": "Daily Stats", "WEEKLY": "Weekly Stats", "MONTHLY": "Monthly Stats"}
             self.set_status(f"Switched to {names.get(self.view, self.view)} view.")
 
@@ -1507,7 +1517,7 @@ class VLoggerTUI:
             self.refresh_data()
             self.set_status("Data refreshed.")
 
-        elif ch in (ord('?'), ord('h')):
+        elif ch == ord('?'):
             self.mode = "HELP"
 
         return True

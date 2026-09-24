@@ -205,6 +205,32 @@ class TestTUI(unittest.TestCase):
         self.tui._handle_normal_key(ord('4'))
         self.assertEqual(self.tui.view, "MONTHLY")
 
+        # Test 'l' to cycle forward (right)
+        self.tui._handle_normal_key(ord('1'))
+        self.assertEqual(self.tui.view, "LOGS")
+        self.tui._handle_normal_key(ord('l'))
+        self.assertEqual(self.tui.view, "STATS")
+        self.tui._handle_normal_key(ord('l'))
+        self.assertEqual(self.tui.view, "WEEKLY")
+        self.tui._handle_normal_key(ord('l'))
+        self.assertEqual(self.tui.view, "MONTHLY")
+        self.tui._handle_normal_key(ord('l'))
+        self.assertEqual(self.tui.view, "LOGS")
+
+        # Test 'h' to cycle backward (left)
+        self.tui._handle_normal_key(ord('h'))
+        self.assertEqual(self.tui.view, "MONTHLY")
+        self.tui._handle_normal_key(ord('h'))
+        self.assertEqual(self.tui.view, "WEEKLY")
+        self.tui._handle_normal_key(ord('h'))
+        self.assertEqual(self.tui.view, "STATS")
+        self.tui._handle_normal_key(ord('h'))
+        self.assertEqual(self.tui.view, "LOGS")
+
+        # Test '?' toggles HELP mode
+        self.tui._handle_normal_key(ord('?'))
+        self.assertEqual(self.tui.mode, "HELP")
+
     def test_daily_stats_navigation_and_day_detail(self):
         from datetime import datetime
         t1 = datetime(2026, 9, 20, 9, 0, 0)

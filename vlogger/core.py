@@ -1,11 +1,24 @@
+import atexit
 import os
 import re
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 
 from vlogger.db import Database
 from vlogger.models import TimeEntry
+
+_ACTIVE_SYNC_THREADS: List[threading.Thread] = []
+
+
+def _cleanup_sync_threads(timeout: float = 3.0) -> None:
+    for t in list(_ACTIVE_SYNC_THREADS):
+        if t.is_alive():
+            t.join(timeout=timeout)
+
+
+atexit.register(_cleanup_sync_threads)
 
 
 def parse_duration(duration_str: str) -> int:
@@ -97,6 +110,45 @@ class VLoggerCore:
         except Exception:
             return None
 
+    def _log_sync_error(self, error_msg: str) -> None:
+        """Append sync failures with timestamp to ~/.local/share/vlogger/sync.log."""
+        try:
+            log_file = self.db.db_path.parent / "sync.log"
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"[{now_str}] Sync error: {error_msg}\n")
+        except Exception:
+            pass
+
+    def _run_sync_worker(self, target_path: Path, cmd_formatted: str) -> None:
+        current_thread = threading.current_thread()
+        try:
+            import subprocess
+            res = subprocess.run(
+                ["sh", "-c", cmd_formatted],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30.0,
+                text=True,
+            )
+            if res.returncode != 0:
+                err = res.stderr.strip() or res.stdout.strip() or f"exit code {res.returncode}"
+                self._log_sync_error(err)
+        except Exception as ex:
+            self._log_sync_error(str(ex))
+        finally:
+            if current_thread in _ACTIVE_SYNC_THREADS:
+                try:
+                    _ACTIVE_SYNC_THREADS.remove(current_thread)
+                except ValueError:
+                    pass
+
+    def wait_for_sync(self, timeout: float = 3.0) -> None:
+        """Wait for any background sync operation to complete."""
+        t = getattr(self, "_active_sync_thread", None)
+        if t and t.is_alive():
+            t.join(timeout=timeout)
+
     def sync_html_report(
         self,
         path: Optional[Path] = None,
@@ -125,24 +177,24 @@ class VLoggerCore:
                     return True, "Synced successfully."
                 else:
                     err = res.stderr.strip() or res.stdout.strip() or f"exit code {res.returncode}"
+                    self._log_sync_error(err)
                     return False, f"Sync command failed: {err}"
             else:
-                proc = subprocess.Popen(
-                    ["sh", "-c", cmd_formatted],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    stdin=subprocess.DEVNULL,
-                    start_new_session=True,
+                t = threading.Thread(
+                    target=self._run_sync_worker,
+                    args=(target_path, cmd_formatted),
+                    daemon=False,
                 )
-                self._bg_procs = [p for p in getattr(self, "_bg_procs", []) if p.poll() is None]
-                self._bg_procs.append(proc)
-                proc.returncode = 0
+                _ACTIVE_SYNC_THREADS.append(t)
+                self._active_sync_thread = t
+                t.start()
                 return True, "Sync command started in background."
         except Exception as ex:
+            self._log_sync_error(str(ex))
             return False, f"Failed to execute sync command: {ex}"
 
     def _trigger_sync_cmd_safe(self, path: Path) -> None:
-        """Run post-generate sync hook safely in background without throwing exceptions."""
+        """Run post-generate sync hook safely in background worker without throwing exceptions."""
         try:
             self.sync_html_report(path, wait=False)
         except Exception:
