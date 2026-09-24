@@ -54,8 +54,11 @@ def export_entries(
             d["tags"] = ",".join(d["tags"])
             writer.writerow(d)
         return output.getvalue()
+    elif fmt_lower == "html":
+        from vlogger.html_report import generate_html_report
+        return generate_html_report(db)
     else:
-        raise ValueError(f"Unsupported export format: {fmt}. Choose 'json', 'jsonl', or 'csv'.")
+        raise ValueError(f"Unsupported export format: {fmt}. Choose 'json', 'jsonl', 'csv', or 'html'.")
 
 
 def export_to_file(
@@ -70,7 +73,7 @@ def export_to_file(
     target_path = Path(file_path).expanduser().resolve()
     if not fmt:
         ext = target_path.suffix.lstrip(".").lower()
-        fmt = ext if ext in ("json", "jsonl", "csv") else "json"
+        fmt = ext if ext in ("json", "jsonl", "csv", "html") else "json"
 
     content = export_entries(db, fmt=fmt, since=since, until=until, project=project)
     target_path.parent.mkdir(parents=True, exist_ok=True)

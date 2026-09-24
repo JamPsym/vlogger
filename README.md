@@ -9,7 +9,8 @@
 
 - **Keyboard-First Vim Workflow**: Interactive curses TUI inside Kitty terminal with modal Vim controls (`s` to toggle, `i` to edit description, `j`/`k` to navigate history, `x` to delete, `d` to reset default).
 - **Persistent SQLite Engine**: Stored in `~/.local/share/vlogger/vlogger.db` with WAL mode enabled for concurrent reads/writes without locks.
-- **Future-Proof Clean Export**: Export your logs at any time to **JSON**, **JSONL (Lines)**, or **CSV** with standard ISO 8601 timestamps, duration in seconds, project labels, and tags.
+- **Auto-Generated Static HTML Dashboard**: Automatically refreshed after each task completion to `~/.local/share/vlogger/progress.html`. Self-contained with pure CSS & SVG (zero external CDNs or network requests), responsive dark theme, daily stats, visual activity bar chart, live log filter, and print-to-PDF support.
+- **Future-Proof Clean Export**: Export your logs at any time to **JSON**, **JSONL (Lines)**, **CSV**, or **HTML** with standard ISO 8601 timestamps, duration in seconds, project labels, and tags.
 - **Hyprland & Waybar Native**:
   - Launch as a floating Kitty scratchpad (`kitty --class vlogger -e vlogger`).
   - Single-key instant toggle shortcut (`vlogger toggle`).
@@ -44,14 +45,24 @@ vlogger add 45m "Code review" -p reviews
 # Edit / rename a past entry
 vlogger edit 4 "Refactored user authentication"
 
+# View daily statistics and summary breakdown
+vlogger stats
+vlogger stats --days 30
+vlogger stats --json
+
+# View and generate static HTML progress dashboard
+vlogger report
+vlogger report --open
+
 # Export for external databases, pipelines, or spreadsheets
 vlogger export --format json --out work_logs.json
 vlogger export --format csv --out work_logs.csv
+vlogger export --format html --out progress.html
 ```
 
 ---
 
-## Interactive TUI (Vim Keybindings)
+## Interactive TUI (Vim Keybindings & Views)
 
 Run `vlogger` in any terminal (like Kitty):
 
@@ -61,31 +72,53 @@ Run `vlogger` in any terminal (like Kitty):
 │                                                                                │
 │  Description: [ Refactor authentication middleware ________________________ ] │
 │                                                                                │
-│  [s: STOP]      [i: Edit Desc]      [d: Reset Default]   [D: Save as Default]  │
+│  [s: STOP]      [i: Edit]      [p: Pick Past]       [d: Last Desc]             │
 └────────────────────────────────────────────────────────────────────────────────┘
-┌───────────────────── Recent Work Logs (Today: 03h 45m in 4 entries) ────────────┐
+╭──[ 1: Logs ]──[ 2: Daily ]──[ 3: Weekly ]──[ 4: Monthly ]── (Today: 03h 45m) ──╮
 │   ID    START      END        DURATION   DESCRIPTION                           │
 │ ────────────────────────────────────────────────────────────────────────────── │
 │ > #4    09-21 11:20 [Active]   01:24:35   Refactor authentication middleware   │
 │   #3    09-21 10:15 11:00      00:45:00   Client sprint sync                   │
 │   #2    09-21 09:00 10:00      01:00:00   Review pull requests                 │
-└────────────────────────────────────────────────────────────────────────────────┘
--- NORMAL --   s: Start/Stop | i: Edit | d: Default | j/k: Nav | x: Del | ?: Help
+╰────────────────────────────────────────────────────────────────────────────────╯
+-- NORMAL --   Tab/v: Switch view (1-4) | s: Start/Stop | i: Edit | p: Pick | y: Yank
+```
+
+Press **`<Tab>`**, **`v`**, or **`1`** / **`2`** / **`3`** / **`4`** to switch between views:
+- **`1: Logs`**: Chronological log of recent time entries with inline editing and deletion.
+- **`2: Daily Stats`**: Daily aggregates with activity bars, top task breakdowns, and session details modal.
+- **`3: Weekly Stats`**: ISO week summaries (`YYYY-Www`), weekly averages, active day counts, and daily breakdowns.
+- **`4: Monthly Stats`**: Monthly summaries (`YYYY-MM`), active day counts, top projects, and weekly breakdowns.
+
+```
+╭──[ 1: Logs ]──[ 2: Daily ]──[ 3: Weekly ]──[ 4: Monthly ]── (Total: 42h 10m) ──╮
+│   Total: 42h 10m across 7 active days  │  Daily Avg: 06h 01m  │  Peak: 09-21    │
+│ ────────────────────────────────────────────────────────────────────────────── │
+│   DATE         DAY         DURATION   ENTRIES   ACTIVITY BAR TOP TASKS         │
+│ > 2026-09-22   Tue [Today] 04:15:00   3 ent     ██████░░░░   Refactor auth ... │
+│   2026-09-21   Mon         07:45:00   5 ent     ██████████   API dev, Sync ... │
+│ ── Breakdown: 2026-09-22 (Tuesday) ─ 04:15:00 in 3 sessions ─────────────────── │
+│   • Refactor authentication middleware: 3h 00m (70.6%) ─ 2 sessions            │
+│   • Code review: 1h 15m (29.4%) ─ 1 session                                    │
+╰────────────────────────────────────────────────────────────────────────────────╯
+-- NORMAL --   Tab/v: Switch view (1-4) | Enter: View Details | j/k: Nav | y: Yank
 ```
 
 ### Keybinding Reference
 
 | Mode | Key | Action |
 | :--- | :--- | :--- |
-| **Normal** | `s` or `<Space>` | **Toggle Start / Stop** timer |
+| **Normal** | `<Tab>` or `v` | **Cycle through Views** (Logs → Daily → Weekly → Monthly) |
+| **Normal** | `1` / `2` / `3` / `4` | **Switch directly** to Logs (`1`), Daily (`2`), Weekly (`3`), or Monthly (`4`) view |
+| **Normal** | `s` or `<Space>` | **Toggle Start / Stop** timer (runs across all views) |
 | **Normal** | `i` or `a` | **Edit active tracker description** |
 | **Normal** | `p` | **Pick from list of unique past tasks** (prevents duplicate typos) |
-| **Normal** | `y` | **Yank (copy)** selected history entry to active tracker |
-| **Normal** | `e` or `<Enter>` | **Edit name of selected history entry** |
+| **Normal** | `y` | **Yank (copy)** selected history entry or period's top task to tracker |
+| **Normal** | `e` or `<Enter>` | **Edit log entry** (Logs view) / **Open period details modal** (Stats/Weekly/Monthly) |
 | **Normal** | `d` | **Reset active description** to the last used task |
 | **Normal** | `D` | **Save current active description** as the new fallback default |
-| **Normal** | `j` / `k` (or `↓` / `↑`) | Scroll through history entries |
-| **Normal** | `g` / `G` | Jump to top / bottom of history |
+| **Normal** | `j` / `k` (or `↓` / `↑`) | Scroll through history entries or summary statistics |
+| **Normal** | `g` / `G` | Jump to top / bottom of current list |
 | **Normal** | `x` | Delete selected entry (prompts `y/n` confirmation) |
 | **Normal** | `r` | Reload/refresh data from SQLite |
 | **Normal** | `?` | Toggle help modal cheat sheet |
@@ -96,6 +129,7 @@ Run `vlogger` in any terminal (like Kitty):
 | **Insert / Edit** | `Ctrl-u` | Clear description field |
 | **Insert / Edit** | `Ctrl-w` | Delete previous word |
 | **Insert / Edit** | `Ctrl-a` / `Ctrl-e` | Move cursor to beginning / end of line |
+| **Modal / Detail** | `<Esc>` / `<Enter>` / `q` | Close details modal |
 
 ---
 
@@ -176,6 +210,64 @@ vlogger export --format jsonl --out entries.jsonl
 ```bash
 vlogger export --format csv --out entries.csv
 ```
+
+#### HTML (Interactive Static Progress Dashboard — "ekselek")
+```bash
+vlogger export --format html --out ekselek.html
+# Or directly via report command:
+vlogger report --open
+```
+
+> **Automatic Generation & Read-Only Permissions**:
+> The HTML dashboard (`~/.local/share/vlogger/ekselek.html`) regenerates automatically every time any action is taken (`start`, `stop`, `toggle`, manual `add`, rename/edit, or deletion).
+> - Written atomically with **read-only permissions** (`chmod 444` / `r--r--r--`), making it tamper-proof and safe for public hosting.
+> - Displayed as a clean **`[ 🔒 READ-ONLY MONITOR ]`** with viewer shortcuts (<kbd>Tab</kbd>, <kbd>1</kbd>, <kbd>2</kbd>, <kbd>j</kbd>/<kbd>k</kbd>, <kbd>Enter</kbd> for day details, <kbd>r</kbd> to reload).
+> - Active task displays `● RUNNING` in green with a live JavaScript ticking timer.
+> - Automatically detects file updates on disk and reloads seamlessly when hosted over HTTP.
+
+### Public Hosting & Network Synchronization (Passwordless SSH / SCP / rsync)
+
+To automatically sync the read-only `ekselek` dashboard to a publicly hosted machine on your local network:
+
+1. **Set up SSH key authentication** (run once):
+   ```bash
+   ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+   ssh-copy-id user@remote-ip
+   ```
+   *(After this, `ssh`, `scp`, and `rsync` connect instantly without password prompts!)*
+
+2. **Configure an automatic sync hook in vlogger**:
+   ```bash
+   # Sync via rsync with remote read-only permissions (chmod 444)
+   vlogger config set html_sync_cmd "rsync -az --chmod=ugo=r {file} user@remote-ip:/var/www/html/ekselek.html"
+
+   # Or sync directly as a file named 'ekselek'
+   vlogger config set html_sync_cmd "rsync -az --chmod=ugo=r {file} user@remote-ip:/var/www/html/ekselek"
+
+   # Or via SCP with remote chmod 444
+   vlogger config set html_sync_cmd "scp {file} user@remote-ip:/var/www/html/ekselek.html && ssh user@remote-ip 'chmod 444 /var/www/html/ekselek.html'"
+   ```
+
+3. **Public Web Server Configuration (Nginx / Caddy / Python)**:
+   - **Nginx** (serve at `/ekselek`):
+     ```nginx
+     location /ekselek {
+         default_type text/html;
+         alias /var/www/html/ekselek.html;
+     }
+     ```
+   - **Caddy**:
+     ```caddy
+     route /ekselek* {
+         file_server {
+             index ekselek.html
+         }
+     }
+     ```
+   - **Quick Python LAN server on remote host**:
+     ```bash
+     python3 -m http.server 80 --directory /var/www/html
+     ```
 
 ### Date and Project Filters
 ```bash

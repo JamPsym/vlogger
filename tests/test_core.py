@@ -74,6 +74,22 @@ class TestCore(unittest.TestCase):
         self.assertEqual(payload_run["class"], "running")
         self.assertIn("Waybar Test", payload_run["text"])
 
+    def test_daily_stats_and_summary(self):
+        from datetime import datetime
+        t1 = datetime(2026, 9, 21, 9, 0, 0)
+        t2 = datetime(2026, 9, 22, 10, 0, 0)
+        self.db.add_manual_entry("Task 1", 3600, start_dt=t1)
+        self.db.add_manual_entry("Task 2", 7200, start_dt=t2)
+
+        days, summary = self.core.get_daily_stats()
+        self.assertGreaterEqual(len(days), 2)
+        self.assertEqual(summary["total_seconds"], 10800)
+        self.assertEqual(summary["total_entries"], 2)
+        self.assertEqual(summary["active_days"], 2)
+        self.assertEqual(summary["average_daily_seconds"], 5400)
+        self.assertEqual(summary["max_day_seconds"], 7200)
+        self.assertEqual(summary["peak_day"], "2026-09-22")
+
 
 if __name__ == "__main__":
     unittest.main()

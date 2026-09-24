@@ -166,6 +166,148 @@ class TestTUI(unittest.TestCase):
         keep_running = self.tui._handle_normal_key(ord('q'))
         self.assertFalse(keep_running)
 
+    def test_view_switching(self):
+        self.assertEqual(self.tui.view, "LOGS")
+
+        # Press Tab (ASCII 9) to cycle to STATS
+        self.tui._handle_normal_key(9)
+        self.assertEqual(self.tui.view, "STATS")
+
+        # Press Tab to cycle to WEEKLY
+        self.tui._handle_normal_key(9)
+        self.assertEqual(self.tui.view, "WEEKLY")
+
+        # Press Tab to cycle to MONTHLY
+        self.tui._handle_normal_key(9)
+        self.assertEqual(self.tui.view, "MONTHLY")
+
+        # Press Tab to cycle back to LOGS
+        self.tui._handle_normal_key(9)
+        self.assertEqual(self.tui.view, "LOGS")
+
+        # Press 'v' to cycle to STATS
+        self.tui._handle_normal_key(ord('v'))
+        self.assertEqual(self.tui.view, "STATS")
+
+        # Press '1' to jump to LOGS
+        self.tui._handle_normal_key(ord('1'))
+        self.assertEqual(self.tui.view, "LOGS")
+
+        # Press '2' to jump to STATS
+        self.tui._handle_normal_key(ord('2'))
+        self.assertEqual(self.tui.view, "STATS")
+
+        # Press '3' to jump to WEEKLY
+        self.tui._handle_normal_key(ord('3'))
+        self.assertEqual(self.tui.view, "WEEKLY")
+
+        # Press '4' to jump to MONTHLY
+        self.tui._handle_normal_key(ord('4'))
+        self.assertEqual(self.tui.view, "MONTHLY")
+
+    def test_daily_stats_navigation_and_day_detail(self):
+        from datetime import datetime
+        t1 = datetime(2026, 9, 20, 9, 0, 0)
+        t2 = datetime(2026, 9, 21, 10, 0, 0)
+        self.db.add_manual_entry("Past Task 1", 3600, start_dt=t1)
+        self.db.add_manual_entry("Past Task 2", 1800, start_dt=t2)
+        self.tui.refresh_data()
+
+        # Switch to STATS view
+        self.tui._handle_normal_key(ord('2'))
+        self.assertEqual(self.tui.view, "STATS")
+        self.assertEqual(self.tui.stats_selected_idx, 0)
+
+        # Move down with 'j'
+        self.tui._handle_normal_key(ord('j'))
+        self.assertEqual(self.tui.stats_selected_idx, 1)
+
+        # Move up with 'k'
+        self.tui._handle_normal_key(ord('k'))
+        self.assertEqual(self.tui.stats_selected_idx, 0)
+
+        # Press Enter to open DAY_DETAIL modal
+        self.tui._handle_normal_key(10)
+        self.assertEqual(self.tui.mode, "DAY_DETAIL")
+        self.assertIsNotNone(self.tui.selected_day_detail)
+
+        # Press Esc (27) to close modal
+        self.tui._handle_day_detail_key(27)
+        self.assertEqual(self.tui.mode, "NORMAL")
+
+    def test_daily_stats_yank(self):
+        from datetime import datetime
+        t1 = datetime(2026, 9, 21, 9, 0, 0)
+        self.db.add_manual_entry("Unique Project Task", 3600, start_dt=t1)
+        self.tui.refresh_data()
+
+        # Switch to STATS view
+        self.tui._handle_normal_key(ord('2'))
+        # Select the day with the task (may be index 0 or 1 depending on whether today has entries)
+        target_idx = 0
+        for i, d in enumerate(self.tui.daily_stats):
+            if d["date"] == "2026-09-21":
+                target_idx = i
+                break
+        self.tui.stats_selected_idx = target_idx
+
+        # Press 'y' to yank top task of that day
+        self.tui._handle_normal_key(ord('y'))
+        self.assertEqual(self.tui.desc_buffer, "Unique Project Task")
+
+    def test_daily_stats_timer_toggle(self):
+        # In STATS view, start timer with 's'
+        self.tui._handle_normal_key(ord('2'))
+        self.assertEqual(self.tui.view, "STATS")
+
+        self.tui._handle_normal_key(ord('s'))
+        self.tui.refresh_data()
+        self.assertIsNotNone(self.tui.active_entry)
+        self.assertEqual(self.tui.active_entry.description, "Work")
+
+        # Stop timer with 's'
+        self.tui._handle_normal_key(ord('s'))
+        self.tui.refresh_data()
+        self.assertIsNone(self.tui.active_entry)
+
+    def test_weekly_and_monthly_stats_navigation(self):
+        from datetime import datetime
+        t1 = datetime(2026, 9, 20, 9, 0, 0)
+        t2 = datetime(2026, 9, 21, 10, 0, 0)
+        self.db.add_manual_entry("Past Task 1", 3600, start_dt=t1)
+        self.db.add_manual_entry("Past Task 2", 1800, start_dt=t2)
+        self.tui.refresh_data()
+
+        # Switch to WEEKLY view
+        self.tui._handle_normal_key(ord('3'))
+        self.assertEqual(self.tui.view, "WEEKLY")
+        self.assertEqual(self.tui.weekly_selected_idx, 0)
+
+        # Press Enter to open detail modal
+        self.tui._handle_normal_key(10)
+        self.assertEqual(self.tui.mode, "DAY_DETAIL")
+        self.assertIsNotNone(self.tui.selected_day_detail)
+        self.assertIn("week", self.tui.selected_day_detail)
+
+        # Press Esc (27) to close modal
+        self.tui._handle_day_detail_key(27)
+        self.assertEqual(self.tui.mode, "NORMAL")
+
+        # Switch to MONTHLY view
+        self.tui._handle_normal_key(ord('4'))
+        self.assertEqual(self.tui.view, "MONTHLY")
+        self.assertEqual(self.tui.monthly_selected_idx, 0)
+
+        # Press Enter to open detail modal
+        self.tui._handle_normal_key(10)
+        self.assertEqual(self.tui.mode, "DAY_DETAIL")
+        self.assertIsNotNone(self.tui.selected_day_detail)
+        self.assertIn("month", self.tui.selected_day_detail)
+
+        # Press Esc (27) to close modal
+        self.tui._handle_day_detail_key(27)
+        self.assertEqual(self.tui.mode, "NORMAL")
+
 
 if __name__ == "__main__":
     unittest.main()

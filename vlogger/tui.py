@@ -22,7 +22,8 @@ class VLoggerTUI:
         self.core = VLoggerCore(self.db)
         
         # State
-        self.mode = "NORMAL"  # "NORMAL", "INSERT", "CONFIRM_DELETE", "HELP", "EDIT_HISTORY"
+        self.mode = "NORMAL"  # "NORMAL", "INSERT", "CONFIRM_DELETE", "HELP", "EDIT_HISTORY", "PICK_DESC", "DAY_DETAIL"
+        self.view = "LOGS"  # "LOGS", "STATS", "WEEKLY", "MONTHLY"
         self.default_desc = self.core.default_description
         self.desc_buffer = self.default_desc
         self.cursor_pos = len(self.desc_buffer)
@@ -31,6 +32,24 @@ class VLoggerTUI:
         self.history_offset = 0
         self.entries: List[TimeEntry] = []
         self.active_entry: Optional[TimeEntry] = None
+
+        self.stats_selected_idx = 0
+        self.stats_offset = 0
+        self.daily_stats: List[dict] = []
+        self.daily_summary: dict = {}
+
+        self.weekly_selected_idx = 0
+        self.weekly_offset = 0
+        self.weekly_stats: List[dict] = []
+        self.weekly_summary: dict = {}
+
+        self.monthly_selected_idx = 0
+        self.monthly_offset = 0
+        self.monthly_stats: List[dict] = []
+        self.monthly_summary: dict = {}
+
+        self.selected_day_detail: Optional[dict] = None
+        self.day_detail_offset: int = 0
         
         self.editing_entry_id: Optional[int] = None
         self.edit_buffer: str = ""
@@ -40,7 +59,7 @@ class VLoggerTUI:
         self.pick_idx: int = 0
         self.pick_offset: int = 0
 
-        self.status_message = "Ready. Press 's' to start/stop, 'p' to pick past task, 'i' to edit, '?' for help."
+        self.status_message = "Ready. Press 's' to start/stop, Tab to switch views (1-4), 'i' to edit, '?' for help."
         self.status_message_time = time.time()
         self.pending_delete_id: Optional[int] = None
 
@@ -49,11 +68,21 @@ class VLoggerTUI:
         self.status_message_time = time.time() + duration
 
     def refresh_data(self):
-        """Reload active entry and recent entries from SQLite."""
+        """Reload active entry, recent entries, daily, weekly, and monthly stats from SQLite."""
         self.active_entry = self.db.get_active_entry()
         self.entries = self.db.list_entries(limit=50)
         self.default_desc = self.core.default_description
-        
+        self.daily_stats, self.daily_summary = self.core.get_daily_stats(days_limit=30)
+        self.weekly_stats, self.weekly_summary = self.core.get_weekly_stats(weeks_limit=26)
+        self.monthly_stats, self.monthly_summary = self.core.get_monthly_stats(months_limit=12)
+
+        if self.stats_selected_idx >= len(self.daily_stats) and self.daily_stats:
+            self.stats_selected_idx = len(self.daily_stats) - 1
+        if self.weekly_selected_idx >= len(self.weekly_stats) and self.weekly_stats:
+            self.weekly_selected_idx = len(self.weekly_stats) - 1
+        if self.monthly_selected_idx >= len(self.monthly_stats) and self.monthly_stats:
+            self.monthly_selected_idx = len(self.monthly_stats) - 1
+
         # If active entry exists and we are not currently editing, reflect its description
         if self.active_entry and self.mode not in ("INSERT", "PICK_DESC"):
             self.desc_buffer = self.active_entry.description
@@ -169,7 +198,14 @@ class VLoggerTUI:
             # Render UI Components
             self._render_header(stdscr, max_y, max_x)
             self._render_timer_and_controls(stdscr, max_y, max_x)
-            self._render_history_table(stdscr, max_y, max_x)
+            if self.view == "LOGS":
+                self._render_history_table(stdscr, max_y, max_x)
+            elif self.view == "STATS":
+                self._render_daily_stats(stdscr, max_y, max_x)
+            elif self.view == "WEEKLY":
+                self._render_weekly_stats(stdscr, max_y, max_x)
+            elif self.view == "MONTHLY":
+                self._render_monthly_stats(stdscr, max_y, max_x)
             self._render_footer(stdscr, max_y, max_x)
 
             if self.mode == "HELP":
@@ -180,6 +216,8 @@ class VLoggerTUI:
                 self._render_edit_history_modal(stdscr, max_y, max_x)
             elif self.mode == "PICK_DESC":
                 self._render_pick_desc_modal(stdscr, max_y, max_x)
+            elif self.mode == "DAY_DETAIL":
+                self._render_day_detail_modal(stdscr, max_y, max_x)
 
             stdscr.refresh()
 
@@ -196,7 +234,7 @@ class VLoggerTUI:
             if self.mode == "CONFIRM_DELETE":
                 if ch in (ord('y'), ord('Y')):
                     if self.pending_delete_id:
-                        self.db.delete_entry(self.pending_delete_id)
+                        self.core.delete_entry(self.pending_delete_id)
                         self.set_status(f"Entry #{self.pending_delete_id} deleted.")
                     self.pending_delete_id = None
                     self.mode = "NORMAL"
@@ -214,6 +252,10 @@ class VLoggerTUI:
                 self._handle_pick_desc_key(ch)
                 continue
 
+            if self.mode == "DAY_DETAIL":
+                self._handle_day_detail_key(ch)
+                continue
+
             if self.mode == "NORMAL":
                 if not self._handle_normal_key(ch):
                     break
@@ -222,7 +264,7 @@ class VLoggerTUI:
 
     def _render_header(self, stdscr, max_y: int, max_x: int):
         title = " ⚡ VLOGGER "
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         
         # Draw top banner
         try:
@@ -324,17 +366,13 @@ class VLoggerTUI:
         if box_h < 5:
             return
 
-        today_stats = self.db.get_stats_for_today()
-        today_dur = TimeEntry.format_duration(today_stats["total_seconds"])
-        today_count = today_stats["count"]
-        table_title = f"Recent Work Logs (Today: {today_dur} in {today_count} entries)"
-
-        self._draw_box(stdscr, box_y, box_x, box_h, box_w, title=table_title, color_pair=1)
+        self._draw_box(stdscr, box_y, box_x, box_h, box_w, title="", color_pair=1)
+        self._render_box_tabs(stdscr, box_y, box_x, box_w)
 
         # Header columns
         col_start = box_x + 2
         try:
-            header_str = f"  {'ID':<5} {'START':<10} {'END':<10} {'DURATION':<10} {'DESCRIPTION'}"
+            header_str = f"  {'ID':<5} {'START':^11} {'END':<10} {'DURATION':<10} {'DESCRIPTION'}"
             stdscr.addstr(box_y + 1, col_start, header_str[:box_w - 4], curses.color_pair(1) | curses.A_BOLD)
             stdscr.addstr(box_y + 2, col_start, "─" * (box_w - 4), curses.color_pair(1) | curses.A_DIM)
         except curses.error:
@@ -368,7 +406,7 @@ class VLoggerTUI:
             # Start / End time formatting
             try:
                 s_dt = datetime.fromisoformat(entry.start_time)
-                start_fmt = s_dt.strftime("%m-%d %H:%M")
+                start_fmt = s_dt.strftime("%d.%m %H:%M")
             except Exception:
                 start_fmt = entry.start_time[:10]
 
@@ -384,7 +422,7 @@ class VLoggerTUI:
                 dur_fmt = TimeEntry.format_duration(entry.calculate_duration())
 
             desc = entry.description
-            row_str = f"{'>' if is_sel else ' '} {eid:<5} {start_fmt:<10} {end_fmt:<10} {dur_fmt:<10} {desc}"
+            row_str = f"{'>' if is_sel else ' '} {eid:<5} {start_fmt:<11} {end_fmt:<10} {dur_fmt:<10} {desc}"
 
             row_y = box_y + 3 + row_i
             attr = curses.color_pair(7) | curses.A_BOLD if is_sel else curses.color_pair(9)
@@ -396,6 +434,583 @@ class VLoggerTUI:
                 stdscr.addstr(row_y, col_start, row_str[:box_w - 4].ljust(box_w - 4), attr)
             except curses.error:
                 pass
+
+    def _render_box_tabs(self, stdscr, box_y: int, box_x: int, box_w: int):
+        """Draw interactive view tabs onto the top border of the lower panel."""
+        tabs = [
+            ("LOGS", " [1: Logs] "),
+            ("STATS", " [2: Daily] "),
+            ("WEEKLY", " [3: Weekly] "),
+            ("MONTHLY", " [4: Monthly] "),
+        ]
+
+        attr_active = curses.color_pair(7) | curses.A_BOLD
+        attr_inactive = curses.color_pair(1)
+
+        try:
+            cur_x = box_x + 2
+            for view_key, tab_label in tabs:
+                attr = attr_active if self.view == view_key else attr_inactive
+                stdscr.addstr(box_y, cur_x, tab_label, attr)
+                cur_x += len(tab_label) + 1
+
+            if self.view == "LOGS":
+                today_stats = self.db.get_stats_for_today()
+                dur_str = TimeEntry.format_duration(today_stats["total_seconds"])
+                info = f"── (Today: {dur_str} in {today_stats['count']} entries)"
+            elif self.view == "STATS":
+                tot_str = self.daily_summary.get("compact_duration", "0s")
+                days_cnt = self.daily_summary.get("active_days", 0)
+                info = f"── (Total: {tot_str} across {days_cnt} active days)"
+            elif self.view == "WEEKLY":
+                tot_str = self.weekly_summary.get("compact_duration", "0s")
+                weeks_cnt = self.weekly_summary.get("active_weeks", 0)
+                info = f"── (Total: {tot_str} across {weeks_cnt} active weeks)"
+            else:
+                tot_str = self.monthly_summary.get("compact_duration", "0s")
+                months_cnt = self.monthly_summary.get("active_months", 0)
+                info = f"── (Total: {tot_str} across {months_cnt} active months)"
+
+            if cur_x + len(info) < box_x + box_w - 2:
+                stdscr.addstr(box_y, cur_x, info, curses.color_pair(9) | curses.A_DIM)
+        except curses.error:
+            pass
+
+    def _render_daily_stats(self, stdscr, max_y: int, max_x: int):
+        box_y = 9
+        box_x = 2
+        box_w = max_x - 4
+        box_h = max_y - box_y - 2
+        
+        if box_h < 5:
+            return
+
+        self._draw_box(stdscr, box_y, box_x, box_h, box_w, title="", color_pair=1)
+        self._render_box_tabs(stdscr, box_y, box_x, box_w)
+
+        col_start = box_x + 2
+        total_str = self.daily_summary.get("compact_duration", "0s")
+        avg_str = self.daily_summary.get("average_daily_formatted", "0s")
+        active_days = self.daily_summary.get("active_days", 0)
+        peak_day = self.daily_summary.get("peak_day", "-")
+        try:
+            peak_day = datetime.strptime(peak_day, "%Y-%m-%d").strftime("%d.%m.%Y")
+        except Exception:
+            pass
+        peak_str = self.daily_summary.get("max_day_formatted", "0s")
+
+        # Top summary stats line
+        summary_line = f"  Total: {total_str} across {active_days} active days  │  Daily Avg: {avg_str}  │  Peak: {peak_day} ({peak_str})"
+        try:
+            stdscr.addstr(box_y + 1, col_start, summary_line[:box_w - 4], curses.color_pair(4) | curses.A_BOLD)
+            stdscr.addstr(box_y + 2, col_start, "─" * (box_w - 4), curses.color_pair(1) | curses.A_DIM)
+        except curses.error:
+            pass
+
+        # Columns header
+        if box_w >= 85:
+            header_str = f"  {'DATE':<12} {'DAY':<11} {'DURATION':<10} {'ENTRIES':<9} {'ACTIVITY BAR':<12} {'TOP TASKS'}"
+        elif box_w >= 65:
+            header_str = f"  {'DATE':<12} {'DAY':<8} {'DURATION':<10} {'#':<5} {'TOP TASKS'}"
+        else:
+            header_str = f"  {'DATE':<11} {'DUR':<8} {'#':<4} {'TASKS'}"
+
+        try:
+            stdscr.addstr(box_y + 3, col_start, header_str[:box_w - 4], curses.color_pair(1) | curses.A_BOLD)
+        except curses.error:
+            pass
+
+        if not self.daily_stats or (len(self.daily_stats) == 1 and self.daily_stats[0]["count"] == 0):
+            try:
+                stdscr.addstr(box_y + 5, col_start + 2, "No entries yet. Press 's' to start tracking your work!", curses.color_pair(9) | curses.A_DIM)
+            except curses.error:
+                pass
+            return
+
+        # Determine height allocation between days table and selected day breakdown
+        if box_h >= 14:
+            panel_height = 4  # 1 separator row + 3 task breakdown rows
+            days_table_rows = max(3, box_h - 4 - panel_height - 1)
+        else:
+            days_table_rows = max(1, box_h - 5)
+
+        # Adjust scrolling
+        if self.stats_selected_idx < self.stats_offset:
+            self.stats_offset = self.stats_selected_idx
+        elif self.stats_selected_idx >= self.stats_offset + days_table_rows:
+            self.stats_offset = self.stats_selected_idx - days_table_rows + 1
+
+        max_sec = max(self.daily_summary.get("max_day_seconds", 0), 28800)
+
+        for row_i in range(days_table_rows):
+            d_idx = self.stats_offset + row_i
+            if d_idx >= len(self.daily_stats):
+                break
+
+            d = self.daily_stats[d_idx]
+            is_sel = (d_idx == self.stats_selected_idx) and (self.mode == "NORMAL")
+
+            raw_date = d["date"]
+            try:
+                date_str = datetime.strptime(raw_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except Exception:
+                date_str = raw_date
+            day_disp = d["day_abbr"]
+            if d["is_today"]:
+                day_disp += " [Today]"
+            elif d["is_yesterday"]:
+                day_disp += " [Yest]"
+
+            dur_str = TimeEntry.format_duration(d["total_seconds"])
+            cnt_str = f"{d['count']} ent"
+
+            bar_w = 10
+            ratio = min(1.0, d["total_seconds"] / max_sec) if max_sec > 0 else 0
+            filled = int(round(ratio * bar_w))
+            bar_str = "█" * filled + "░" * (bar_w - filled)
+
+            top_parts = []
+            for t in d.get("tasks", [])[:3]:
+                dur_c = TimeEntry.format_duration(t["total_seconds"], compact=True)
+                top_parts.append(f"{t['description']} ({dur_c})")
+            top_tasks_str = ", ".join(top_parts) if top_parts else "-"
+
+            if box_w >= 85:
+                row_str = f"{'>' if is_sel else ' '} {date_str:<12} {day_disp:<11} {dur_str:<10} {cnt_str:<9} {bar_str:<12} {top_tasks_str}"
+            elif box_w >= 65:
+                row_str = f"{'>' if is_sel else ' '} {date_str:<12} {day_disp:<8} {dur_str:<10} {d['count']:<5} {top_tasks_str}"
+            else:
+                row_str = f"{'>' if is_sel else ' '} {date_str[:5]} {dur_str:<8} {d['count']:<4} {top_tasks_str}"
+
+            row_y = box_y + 4 + row_i
+            attr = curses.color_pair(7) | curses.A_BOLD if is_sel else curses.color_pair(9)
+            if d["has_active"] and not is_sel:
+                attr = curses.color_pair(2) | curses.A_BOLD
+
+            try:
+                stdscr.addstr(row_y, col_start, row_str[:box_w - 4].ljust(box_w - 4), attr)
+            except curses.error:
+                pass
+
+        # Bottom panel for selected day breakdown (if box_h >= 14)
+        if box_h >= 14 and 0 <= self.stats_selected_idx < len(self.daily_stats):
+            sel_day = self.daily_stats[self.stats_selected_idx]
+            panel_y = box_y + 4 + days_table_rows
+            day_name_str = f" ({sel_day['day_name']})" if sel_day.get("day_name") else ""
+            sel_dur_str = TimeEntry.format_duration(sel_day["total_seconds"])
+            panel_title = f"── Breakdown: {sel_day['date']}{day_name_str} ─ {sel_dur_str} in {sel_day['count']} session{'s' if sel_day['count'] != 1 else ''} ──"
+            
+            try:
+                stdscr.addstr(panel_y, col_start, panel_title[:box_w - 4], curses.color_pair(1) | curses.A_BOLD)
+            except curses.error:
+                pass
+
+            tasks = sel_day.get("tasks", [])
+            detail_rows = min(3, box_h - (4 + days_table_rows + 1) - 1)
+            for ti in range(detail_rows):
+                cur_y = panel_y + 1 + ti
+                if ti < len(tasks):
+                    t = tasks[ti]
+                    dur_fmt = TimeEntry.format_duration(t["total_seconds"], compact=True)
+                    pct = t["percentage"]
+                    cnt = t["count"]
+                    t_line = f"  • {t['description']}: {dur_fmt} ({pct}%) ─ {cnt} session{'s' if cnt > 1 else ''}"
+                    try:
+                        stdscr.addstr(cur_y, col_start, t_line[:box_w - 4].ljust(box_w - 4), curses.color_pair(9))
+                    except curses.error:
+                        pass
+                elif ti == 0 and not tasks:
+                    try:
+                        stdscr.addstr(cur_y, col_start, "  • No tasks recorded for this day.".ljust(box_w - 4), curses.color_pair(9) | curses.A_DIM)
+                    except curses.error:
+                        pass
+
+    def _render_weekly_stats(self, stdscr, max_y: int, max_x: int):
+        box_y = 9
+        box_x = 2
+        box_w = max_x - 4
+        box_h = max_y - box_y - 2
+
+        if box_h < 5:
+            return
+
+        self._draw_box(stdscr, box_y, box_x, box_h, box_w, title="", color_pair=1)
+        self._render_box_tabs(stdscr, box_y, box_x, box_w)
+
+        col_start = box_x + 2
+        total_str = self.weekly_summary.get("compact_duration", "0s")
+        avg_str = self.weekly_summary.get("average_weekly_formatted", "0s")
+        active_weeks = self.weekly_summary.get("active_weeks", 0)
+        peak_week = self.weekly_summary.get("peak_week", "-")
+        peak_str = self.weekly_summary.get("max_week_formatted", "0s")
+
+        # Top summary stats line
+        summary_line = f"  Total: {total_str} across {active_weeks} active weeks  │  Weekly Avg: {avg_str}  │  Peak: {peak_week} ({peak_str})"
+        try:
+            stdscr.addstr(box_y + 1, col_start, summary_line[:box_w - 4], curses.color_pair(4) | curses.A_BOLD)
+            stdscr.addstr(box_y + 2, col_start, "─" * (box_w - 4), curses.color_pair(1) | curses.A_DIM)
+        except curses.error:
+            pass
+
+        # Columns header
+        if box_w >= 85:
+            header_str = f"  {'WEEK':<14} {'DATE RANGE':<22} {'DURATION':<10} {'ENTRIES':<9} {'ACTIVITY BAR':<12} {'TOP TASKS'}"
+        elif box_w >= 65:
+            header_str = f"  {'WEEK':<12} {'DATE RANGE':<18} {'DURATION':<10} {'#':<5} {'TOP TASKS'}"
+        else:
+            header_str = f"  {'WEEK':<10} {'DUR':<8} {'#':<4} {'TASKS'}"
+
+        try:
+            stdscr.addstr(box_y + 3, col_start, header_str[:box_w - 4], curses.color_pair(1) | curses.A_BOLD)
+        except curses.error:
+            pass
+
+        if not self.weekly_stats or (len(self.weekly_stats) == 1 and self.weekly_stats[0]["count"] == 0):
+            try:
+                stdscr.addstr(box_y + 5, col_start + 2, "No weekly entries yet. Track time to see weekly statistics!", curses.color_pair(9) | curses.A_DIM)
+            except curses.error:
+                pass
+            return
+
+        # Determine height allocation between table and selected week breakdown
+        if box_h >= 14:
+            panel_height = 4  # 1 separator row + 3 task breakdown rows
+            table_rows = max(3, box_h - 4 - panel_height - 1)
+        else:
+            table_rows = max(1, box_h - 5)
+
+        # Adjust scrolling
+        if self.weekly_selected_idx < self.weekly_offset:
+            self.weekly_offset = self.weekly_selected_idx
+        elif self.weekly_selected_idx >= self.weekly_offset + table_rows:
+            self.weekly_offset = self.weekly_selected_idx - table_rows + 1
+
+        max_sec = max(self.weekly_summary.get("max_week_seconds", 0), 40 * 3600)
+
+        for row_i in range(table_rows):
+            w_idx = self.weekly_offset + row_i
+            if w_idx >= len(self.weekly_stats):
+                break
+
+            w = self.weekly_stats[w_idx]
+            is_sel = (w_idx == self.weekly_selected_idx) and (self.mode == "NORMAL")
+
+            week_disp = w["week"]
+            if w.get("is_current_week"):
+                week_disp += " [Cur]"
+            elif w.get("is_last_week"):
+                week_disp += " [Last]"
+
+            range_disp = w.get("range_formatted", "")
+            dur_str = TimeEntry.format_duration(w["total_seconds"])
+            cnt_str = f"{w['count']} ent"
+
+            bar_w = 10
+            ratio = min(1.0, w["total_seconds"] / max_sec) if max_sec > 0 else 0
+            filled = int(round(ratio * bar_w))
+            bar_str = "█" * filled + "░" * (bar_w - filled)
+
+            top_parts = []
+            for t in w.get("tasks", [])[:3]:
+                dur_c = TimeEntry.format_duration(t["total_seconds"], compact=True)
+                top_parts.append(f"{t['description']} ({dur_c})")
+            top_tasks_str = ", ".join(top_parts) if top_parts else "-"
+
+            if box_w >= 85:
+                row_str = f"{'>' if is_sel else ' '} {week_disp:<14} {range_disp:<22} {dur_str:<10} {cnt_str:<9} {bar_str:<12} {top_tasks_str}"
+            elif box_w >= 65:
+                row_str = f"{'>' if is_sel else ' '} {week_disp:<12} {range_disp:<18} {dur_str:<10} {w['count']:<5} {top_tasks_str}"
+            else:
+                row_str = f"{'>' if is_sel else ' '} {week_disp:<10} {dur_str:<8} {w['count']:<4} {top_tasks_str}"
+
+            row_y = box_y + 4 + row_i
+            attr = curses.color_pair(7) | curses.A_BOLD if is_sel else curses.color_pair(9)
+            if w.get("has_active") and not is_sel:
+                attr = curses.color_pair(2) | curses.A_BOLD
+
+            try:
+                stdscr.addstr(row_y, col_start, row_str[:box_w - 4].ljust(box_w - 4), attr)
+            except curses.error:
+                pass
+
+        # Bottom panel for selected week breakdown (if box_h >= 14)
+        if box_h >= 14 and 0 <= self.weekly_selected_idx < len(self.weekly_stats):
+            sel_week = self.weekly_stats[self.weekly_selected_idx]
+            panel_y = box_y + 4 + table_rows
+            sel_dur_str = TimeEntry.format_duration(sel_week["total_seconds"])
+            act_days = sel_week.get("active_days_count", 0)
+            panel_title = f"── Breakdown: {sel_week['week']} ({sel_week['range_formatted']}) ─ {sel_dur_str} in {sel_week['count']} session{'s' if sel_week['count'] != 1 else ''} ({act_days} active days) ──"
+
+            try:
+                stdscr.addstr(panel_y, col_start, panel_title[:box_w - 4], curses.color_pair(1) | curses.A_BOLD)
+            except curses.error:
+                pass
+
+            tasks = sel_week.get("tasks", [])
+            detail_rows = min(3, box_h - (4 + table_rows + 1) - 1)
+            for ti in range(detail_rows):
+                cur_y = panel_y + 1 + ti
+                if ti < len(tasks):
+                    t = tasks[ti]
+                    dur_fmt = TimeEntry.format_duration(t["total_seconds"], compact=True)
+                    pct = t["percentage"]
+                    cnt = t["count"]
+                    t_line = f"  • {t['description']}: {dur_fmt} ({pct}%) ─ {cnt} session{'s' if cnt > 1 else ''}"
+                    try:
+                        stdscr.addstr(cur_y, col_start, t_line[:box_w - 4].ljust(box_w - 4), curses.color_pair(9))
+                    except curses.error:
+                        pass
+                elif ti == 0 and not tasks:
+                    try:
+                        stdscr.addstr(cur_y, col_start, "  • No tasks recorded for this week.".ljust(box_w - 4), curses.color_pair(9) | curses.A_DIM)
+                    except curses.error:
+                        pass
+
+    def _render_monthly_stats(self, stdscr, max_y: int, max_x: int):
+        box_y = 9
+        box_x = 2
+        box_w = max_x - 4
+        box_h = max_y - box_y - 2
+
+        if box_h < 5:
+            return
+
+        self._draw_box(stdscr, box_y, box_x, box_h, box_w, title="", color_pair=1)
+        self._render_box_tabs(stdscr, box_y, box_x, box_w)
+
+        col_start = box_x + 2
+        total_str = self.monthly_summary.get("compact_duration", "0s")
+        avg_str = self.monthly_summary.get("average_monthly_formatted", "0s")
+        active_months = self.monthly_summary.get("active_months", 0)
+        peak_month = self.monthly_summary.get("peak_month", "-")
+        peak_str = self.monthly_summary.get("max_month_formatted", "0s")
+
+        # Top summary stats line
+        summary_line = f"  Total: {total_str} across {active_months} active months  │  Monthly Avg: {avg_str}  │  Peak: {peak_month} ({peak_str})"
+        try:
+            stdscr.addstr(box_y + 1, col_start, summary_line[:box_w - 4], curses.color_pair(4) | curses.A_BOLD)
+            stdscr.addstr(box_y + 2, col_start, "─" * (box_w - 4), curses.color_pair(1) | curses.A_DIM)
+        except curses.error:
+            pass
+
+        # Columns header
+        if box_w >= 85:
+            header_str = f"  {'MONTH':<14} {'PERIOD':<22} {'DURATION':<10} {'ENTRIES':<9} {'ACTIVITY BAR':<12} {'TOP TASKS'}"
+        elif box_w >= 65:
+            header_str = f"  {'MONTH':<12} {'PERIOD':<18} {'DURATION':<10} {'#':<5} {'TOP TASKS'}"
+        else:
+            header_str = f"  {'MONTH':<10} {'DUR':<8} {'#':<4} {'TASKS'}"
+
+        try:
+            stdscr.addstr(box_y + 3, col_start, header_str[:box_w - 4], curses.color_pair(1) | curses.A_BOLD)
+        except curses.error:
+            pass
+
+        if not self.monthly_stats or (len(self.monthly_stats) == 1 and self.monthly_stats[0]["count"] == 0):
+            try:
+                stdscr.addstr(box_y + 5, col_start + 2, "No monthly entries yet. Track time to see monthly statistics!", curses.color_pair(9) | curses.A_DIM)
+            except curses.error:
+                pass
+            return
+
+        # Determine height allocation between table and selected month breakdown
+        if box_h >= 14:
+            panel_height = 4  # 1 separator row + 3 task breakdown rows
+            table_rows = max(3, box_h - 4 - panel_height - 1)
+        else:
+            table_rows = max(1, box_h - 5)
+
+        # Adjust scrolling
+        if self.monthly_selected_idx < self.monthly_offset:
+            self.monthly_offset = self.monthly_selected_idx
+        elif self.monthly_selected_idx >= self.monthly_offset + table_rows:
+            self.monthly_offset = self.monthly_selected_idx - table_rows + 1
+
+        max_sec = max(self.monthly_summary.get("max_month_seconds", 0), 160 * 3600)
+
+        for row_i in range(table_rows):
+            m_idx = self.monthly_offset + row_i
+            if m_idx >= len(self.monthly_stats):
+                break
+
+            m = self.monthly_stats[m_idx]
+            is_sel = (m_idx == self.monthly_selected_idx) and (self.mode == "NORMAL")
+
+            month_disp = m["month"]
+            if m.get("is_current_month"):
+                month_disp += " [Cur]"
+            elif m.get("is_last_month"):
+                month_disp += " [Last]"
+
+            period_disp = f"{m.get('month_abbr', m['month'])} ({m.get('active_days_count', 0)}d)"
+            dur_str = TimeEntry.format_duration(m["total_seconds"])
+            cnt_str = f"{m['count']} ent"
+
+            bar_w = 10
+            ratio = min(1.0, m["total_seconds"] / max_sec) if max_sec > 0 else 0
+            filled = int(round(ratio * bar_w))
+            bar_str = "█" * filled + "░" * (bar_w - filled)
+
+            top_parts = []
+            for t in m.get("tasks", [])[:3]:
+                dur_c = TimeEntry.format_duration(t["total_seconds"], compact=True)
+                top_parts.append(f"{t['description']} ({dur_c})")
+            top_tasks_str = ", ".join(top_parts) if top_parts else "-"
+
+            if box_w >= 85:
+                row_str = f"{'>' if is_sel else ' '} {month_disp:<14} {period_disp:<22} {dur_str:<10} {cnt_str:<9} {bar_str:<12} {top_tasks_str}"
+            elif box_w >= 65:
+                row_str = f"{'>' if is_sel else ' '} {month_disp:<12} {period_disp:<18} {dur_str:<10} {m['count']:<5} {top_tasks_str}"
+            else:
+                row_str = f"{'>' if is_sel else ' '} {month_disp:<10} {dur_str:<8} {m['count']:<4} {top_tasks_str}"
+
+            row_y = box_y + 4 + row_i
+            attr = curses.color_pair(7) | curses.A_BOLD if is_sel else curses.color_pair(9)
+            if m.get("has_active") and not is_sel:
+                attr = curses.color_pair(2) | curses.A_BOLD
+
+            try:
+                stdscr.addstr(row_y, col_start, row_str[:box_w - 4].ljust(box_w - 4), attr)
+            except curses.error:
+                pass
+
+        # Bottom panel for selected month breakdown (if box_h >= 14)
+        if box_h >= 14 and 0 <= self.monthly_selected_idx < len(self.monthly_stats):
+            sel_month = self.monthly_stats[self.monthly_selected_idx]
+            panel_y = box_y + 4 + table_rows
+            sel_dur_str = TimeEntry.format_duration(sel_month["total_seconds"])
+            act_days = sel_month.get("active_days_count", 0)
+            panel_title = f"── Breakdown: {sel_month['month_name']} ({sel_month['range_formatted']}) ─ {sel_dur_str} in {sel_month['count']} session{'s' if sel_month['count'] != 1 else ''} ({act_days} active days) ──"
+
+            try:
+                stdscr.addstr(panel_y, col_start, panel_title[:box_w - 4], curses.color_pair(1) | curses.A_BOLD)
+            except curses.error:
+                pass
+
+            tasks = sel_month.get("tasks", [])
+            detail_rows = min(3, box_h - (4 + table_rows + 1) - 1)
+            for ti in range(detail_rows):
+                cur_y = panel_y + 1 + ti
+                if ti < len(tasks):
+                    t = tasks[ti]
+                    dur_fmt = TimeEntry.format_duration(t["total_seconds"], compact=True)
+                    pct = t["percentage"]
+                    cnt = t["count"]
+                    t_line = f"  • {t['description']}: {dur_fmt} ({pct}%) ─ {cnt} session{'s' if cnt > 1 else ''}"
+                    try:
+                        stdscr.addstr(cur_y, col_start, t_line[:box_w - 4].ljust(box_w - 4), curses.color_pair(9))
+                    except curses.error:
+                        pass
+                elif ti == 0 and not tasks:
+                    try:
+                        stdscr.addstr(cur_y, col_start, "  • No tasks recorded for this month.".ljust(box_w - 4), curses.color_pair(9) | curses.A_DIM)
+                    except curses.error:
+                        pass
+
+    def _render_day_detail_modal(self, stdscr, max_y: int, max_x: int):
+        if not self.selected_day_detail:
+            self.mode = "NORMAL"
+            return
+
+        modal_w = min(74, max_x - 4)
+        modal_h = min(20, max_y - 2)
+        modal_y = (max_y - modal_h) // 2
+        modal_x = (max_x - modal_w) // 2
+
+        d = self.selected_day_detail
+        if "week" in d:
+            title = f"Week Details: {d['week']} ({d.get('range_formatted', '')})"
+        elif "month" in d:
+            title = f"Month Details: {d.get('month_name', d['month'])} ({d.get('range_formatted', '')})"
+        else:
+            raw_date = d.get("date", "")
+            try:
+                date_str = datetime.strptime(raw_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except Exception:
+                date_str = raw_date
+            day_name = d.get("day_name", "")
+            title = f"Day Details: {date_str} ({day_name})"
+        dur_str = TimeEntry.format_duration(d["total_seconds"])
+        count = d["count"]
+        self._draw_box(
+            stdscr,
+            modal_y,
+            modal_x,
+            modal_h,
+            modal_w,
+            title=title,
+            color_pair=11,
+            fill=True,
+            fill_pair=10,
+        )
+
+        try:
+            # Summary info
+            sub = f"Total Time: {dur_str} across {count} entry{'s' if count != 1 else ''}"
+            stdscr.addstr(modal_y + 2, modal_x + 3, sub[:modal_w - 6], curses.color_pair(11) | curses.A_BOLD)
+            stdscr.addstr(modal_y + 3, modal_x + 3, "─" * (modal_w - 6), curses.color_pair(10) | curses.A_DIM)
+
+            # Entries table header
+            eh = f"  {'ID':<5} {'START':<8} {'END':<8} {'DURATION':<9} {'DESCRIPTION'}"
+            stdscr.addstr(modal_y + 4, modal_x + 3, eh[:modal_w - 6], curses.color_pair(13) | curses.A_BOLD)
+
+            entries = d.get("entries", [])
+            visible_entries = max(2, min(len(entries), modal_h - 10))
+
+            # Adjust scrolling
+            if self.day_detail_offset > len(entries) - visible_entries:
+                self.day_detail_offset = max(0, len(entries) - visible_entries)
+
+            for ei in range(visible_entries):
+                idx = self.day_detail_offset + ei
+                if idx >= len(entries):
+                    break
+                e = entries[idx]
+                eid = f"#{e.id}"
+                try:
+                    s_dt = datetime.fromisoformat(e.start_time)
+                    s_fmt = s_dt.strftime("%H:%M")
+                except Exception:
+                    s_fmt = e.start_time[:5]
+
+                if e.is_active:
+                    e_fmt = "Active"
+                else:
+                    try:
+                        e_dt = datetime.fromisoformat(e.end_time)
+                        e_fmt = e_dt.strftime("%H:%M")
+                    except Exception:
+                        e_fmt = "-"
+
+                e_dur = TimeEntry.format_duration(e.calculate_duration())
+                e_line = f"  {eid:<5} {s_fmt:<8} {e_fmt:<8} {e_dur:<9} {e.description}"
+                row_y = modal_y + 5 + ei
+                attr = curses.color_pair(2) if e.is_active else curses.color_pair(10)
+                stdscr.addstr(row_y, modal_x + 3, e_line[:modal_w - 6].ljust(modal_w - 6), attr)
+
+            # Task breakdown footer
+            tasks_y = modal_y + 5 + visible_entries + 1
+            if tasks_y < modal_y + modal_h - 2:
+                tasks_info = ", ".join(f"{t['description']} ({t['percentage']}%)" for t in d.get("tasks", [])[:3])
+                if tasks_info:
+                    stdscr.addstr(tasks_y, modal_x + 3, ("Tasks: " + tasks_info)[:modal_w - 6], curses.color_pair(10) | curses.A_DIM)
+
+            hint = "Press Esc, Enter, Space, or q to close"
+            stdscr.addstr(modal_y + modal_h - 2, modal_x + (modal_w - len(hint)) // 2, hint, curses.color_pair(13) | curses.A_DIM)
+        except curses.error:
+            pass
+
+    def _handle_day_detail_key(self, ch: int):
+        if ch in (27, ord('q'), ord('Q'), 10, 13, curses.KEY_ENTER, ord(' ')):
+            self.mode = "NORMAL"
+            return
+        elif ch in (ord('j'), curses.KEY_DOWN):
+            entries = self.selected_day_detail.get("entries", []) if self.selected_day_detail else []
+            if self.day_detail_offset < len(entries) - 1:
+                self.day_detail_offset += 1
+        elif ch in (ord('k'), curses.KEY_UP):
+            if self.day_detail_offset > 0:
+                self.day_detail_offset -= 1
 
     def _render_footer(self, stdscr, max_y: int, max_x: int):
         footer_y = max_y - 1
@@ -409,8 +1024,13 @@ class VLoggerTUI:
             hints = "Enter: Save Changes | Esc: Cancel | Ctrl-u: Clear"
         elif self.mode == "PICK_DESC":
             hints = "Enter: Choose Task | j/k or ↓/↑: Nav | Esc: Cancel"
+        elif self.mode == "DAY_DETAIL":
+            hints = "Esc / Enter / q: Close | j/k or ↓/↑: Scroll"
         else:
-            hints = "s: Start/Stop | i: Edit | p: Pick Past | y: Yank | e: Rename | d: Last | ?: Help | q: Quit"
+            if self.view == "LOGS":
+                hints = "Tab/v: Switch view (1-4) | s: Start/Stop | i: Edit | p: Pick | y: Yank | e: Rename | ?: Help | q: Quit"
+            else:
+                hints = "Tab/v: Switch view (1-4) | Enter: View Details | j/k: Nav | y: Yank | s: Start/Stop | ?: Help | q: Quit"
 
         # Check if status message is still active
         if time.time() < self.status_message_time:
@@ -426,7 +1046,7 @@ class VLoggerTUI:
 
     def _render_help_modal(self, stdscr, max_y: int, max_x: int):
         modal_w = min(68, max_x - 6)
-        modal_h = 18
+        modal_h = 20
         modal_y = (max_y - modal_h) // 2
         modal_x = (max_x - modal_w) // 2
 
@@ -443,15 +1063,17 @@ class VLoggerTUI:
         )
 
         lines = [
+            ("Tab or v", "Cycle through Views (Logs, Daily, Weekly, Monthly)"),
+            ("1 / 2 / 3 / 4", "Switch view directly (Logs, Daily, Weekly, Monthly)"),
             ("s or Space", "Toggle Start / Stop timer"),
             ("i or a", "Insert mode: Edit active tracker description"),
             ("p", "Pick from list of unique past tasks"),
-            ("y", "Yank highlighted history task to active tracker"),
-            ("e or Enter", "Edit / rename selected history entry"),
+            ("y", "Yank highlighted history/task to active tracker"),
+            ("e or Enter", "Edit selected log entry / View period details"),
             ("d", "Reset active description to last used task"),
             ("D", "Save current active description as new default"),
-            ("j / k or ↓/↑", "Navigate history entries"),
-            ("g / G", "Jump to top / bottom of history list"),
+            ("j / k or ↓/↑", "Navigate history entries or daily stats"),
+            ("g / G", "Jump to top / bottom of current list"),
             ("x", "Delete selected history entry (with confirm)"),
             ("r", "Refresh data from database"),
             ("q", "Quit TUI (active timer continues in background)"),
@@ -545,7 +1167,7 @@ class VLoggerTUI:
         elif ch in (10, 13, curses.KEY_ENTER):  # Enter key
             new_desc = self.edit_buffer.strip()
             if new_desc and self.editing_entry_id:
-                self.db.update_entry(self.editing_entry_id, description=new_desc)
+                self.core.update_entry(self.editing_entry_id, description=new_desc)
                 self.set_status(f"Updated entry #{self.editing_entry_id}: '{new_desc}'")
             self.mode = "NORMAL"
             self.refresh_data()
@@ -680,7 +1302,7 @@ class VLoggerTUI:
                 self.desc_buffer = chosen
                 self.cursor_pos = len(self.desc_buffer)
                 if self.active_entry:
-                    self.db.update_entry(self.active_entry.id, description=chosen)
+                    self.core.update_entry(self.active_entry.id, description=chosen)
                     self.set_status(f"Updated active task description to: '{chosen}'")
                 else:
                     self.set_status(f"Selected task: '{chosen}'. Press 's' to start.")
@@ -702,6 +1324,29 @@ class VLoggerTUI:
                 started = self.core.start(description=desc)
                 self.set_status(f"Started: '{started.description}'")
 
+        elif ch in (ord('\t'), ord('v'), ord('V')):
+            order = ["LOGS", "STATS", "WEEKLY", "MONTHLY"]
+            cur_i = order.index(self.view) if self.view in order else 0
+            self.view = order[(cur_i + 1) % len(order)]
+            names = {"LOGS": "Recent Logs", "STATS": "Daily Stats", "WEEKLY": "Weekly Stats", "MONTHLY": "Monthly Stats"}
+            self.set_status(f"Switched to {names.get(self.view, self.view)} view.")
+
+        elif ch == ord('1'):
+            self.view = "LOGS"
+            self.set_status("Switched to Recent Logs view.")
+
+        elif ch == ord('2'):
+            self.view = "STATS"
+            self.set_status("Switched to Daily Stats view.")
+
+        elif ch == ord('3'):
+            self.view = "WEEKLY"
+            self.set_status("Switched to Weekly Stats view.")
+
+        elif ch == ord('4'):
+            self.view = "MONTHLY"
+            self.set_status("Switched to Monthly Stats view.")
+
         elif ch in (ord('i'), ord('I'), ord('a'), ord('A')):
             self.mode = "INSERT"
             self.cursor_pos = len(self.desc_buffer)
@@ -716,23 +1361,74 @@ class VLoggerTUI:
                 self.mode = "PICK_DESC"
 
         elif ch in (ord('y'), ord('Y')):
-            if self.entries and 0 <= self.selected_idx < len(self.entries):
-                chosen = self.entries[self.selected_idx].description
-                self.desc_buffer = chosen
-                self.cursor_pos = len(self.desc_buffer)
-                if self.active_entry:
-                    self.db.update_entry(self.active_entry.id, description=chosen)
-                    self.set_status(f"Yanked to active task: '{chosen}'")
-                else:
-                    self.set_status(f"Yanked description: '{chosen}'")
+            if self.view == "LOGS":
+                if self.entries and 0 <= self.selected_idx < len(self.entries):
+                    chosen = self.entries[self.selected_idx].description
+                    self.desc_buffer = chosen
+                    self.cursor_pos = len(self.desc_buffer)
+                    if self.active_entry:
+                        self.core.update_entry(self.active_entry.id, description=chosen)
+                        self.set_status(f"Yanked to active task: '{chosen}'")
+                    else:
+                        self.set_status(f"Yanked description: '{chosen}'")
+            else:
+                chosen = None
+                if self.view == "STATS" and self.daily_stats and 0 <= self.stats_selected_idx < len(self.daily_stats):
+                    tasks = self.daily_stats[self.stats_selected_idx].get("tasks", [])
+                    if tasks:
+                        chosen = tasks[0]["description"]
+                elif self.view == "WEEKLY" and self.weekly_stats and 0 <= self.weekly_selected_idx < len(self.weekly_stats):
+                    tasks = self.weekly_stats[self.weekly_selected_idx].get("tasks", [])
+                    if tasks:
+                        chosen = tasks[0]["description"]
+                elif self.view == "MONTHLY" and self.monthly_stats and 0 <= self.monthly_selected_idx < len(self.monthly_stats):
+                    tasks = self.monthly_stats[self.monthly_selected_idx].get("tasks", [])
+                    if tasks:
+                        chosen = tasks[0]["description"]
 
-        elif ch in (ord('e'), ord('E'), ord('c'), 10, 13, curses.KEY_ENTER):
-            if self.entries and 0 <= self.selected_idx < len(self.entries):
-                target = self.entries[self.selected_idx]
-                self.editing_entry_id = target.id
-                self.edit_buffer = target.description
-                self.edit_cursor_pos = len(self.edit_buffer)
-                self.mode = "EDIT_HISTORY"
+                if chosen:
+                    self.desc_buffer = chosen
+                    self.cursor_pos = len(self.desc_buffer)
+                    if self.active_entry:
+                        self.core.update_entry(self.active_entry.id, description=chosen)
+                        self.set_status(f"Yanked top task '{chosen}' to active task.")
+                    else:
+                        self.set_status(f"Yanked description: '{chosen}'")
+
+        elif ch in (10, 13, curses.KEY_ENTER):
+            if self.view == "LOGS":
+                if self.entries and 0 <= self.selected_idx < len(self.entries):
+                    target = self.entries[self.selected_idx]
+                    self.editing_entry_id = target.id
+                    self.edit_buffer = target.description
+                    self.edit_cursor_pos = len(self.edit_buffer)
+                    self.mode = "EDIT_HISTORY"
+            elif self.view == "STATS":
+                if self.daily_stats and 0 <= self.stats_selected_idx < len(self.daily_stats):
+                    self.selected_day_detail = self.daily_stats[self.stats_selected_idx]
+                    self.day_detail_offset = 0
+                    self.mode = "DAY_DETAIL"
+            elif self.view == "WEEKLY":
+                if self.weekly_stats and 0 <= self.weekly_selected_idx < len(self.weekly_stats):
+                    self.selected_day_detail = self.weekly_stats[self.weekly_selected_idx]
+                    self.day_detail_offset = 0
+                    self.mode = "DAY_DETAIL"
+            elif self.view == "MONTHLY":
+                if self.monthly_stats and 0 <= self.monthly_selected_idx < len(self.monthly_stats):
+                    self.selected_day_detail = self.monthly_stats[self.monthly_selected_idx]
+                    self.day_detail_offset = 0
+                    self.mode = "DAY_DETAIL"
+
+        elif ch in (ord('e'), ord('E'), ord('c')):
+            if self.view == "LOGS":
+                if self.entries and 0 <= self.selected_idx < len(self.entries):
+                    target = self.entries[self.selected_idx]
+                    self.editing_entry_id = target.id
+                    self.edit_buffer = target.description
+                    self.edit_cursor_pos = len(self.edit_buffer)
+                    self.mode = "EDIT_HISTORY"
+            else:
+                self.set_status("Cannot rename summary row. Switch to Logs view (1) to edit.")
 
         elif ch == ord('d'):  # Reset to default description (last used)
             self.desc_buffer = self.default_desc
@@ -747,25 +1443,65 @@ class VLoggerTUI:
                 self.set_status(f"Saved '{new_def}' as default description.")
 
         elif ch in (ord('j'), curses.KEY_DOWN):
-            if self.entries and self.selected_idx < len(self.entries) - 1:
-                self.selected_idx += 1
+            if self.view == "LOGS":
+                if self.entries and self.selected_idx < len(self.entries) - 1:
+                    self.selected_idx += 1
+            elif self.view == "STATS":
+                if self.daily_stats and self.stats_selected_idx < len(self.daily_stats) - 1:
+                    self.stats_selected_idx += 1
+            elif self.view == "WEEKLY":
+                if self.weekly_stats and self.weekly_selected_idx < len(self.weekly_stats) - 1:
+                    self.weekly_selected_idx += 1
+            elif self.view == "MONTHLY":
+                if self.monthly_stats and self.monthly_selected_idx < len(self.monthly_stats) - 1:
+                    self.monthly_selected_idx += 1
 
         elif ch in (ord('k'), curses.KEY_UP):
-            if self.selected_idx > 0:
-                self.selected_idx -= 1
+            if self.view == "LOGS":
+                if self.selected_idx > 0:
+                    self.selected_idx -= 1
+            elif self.view == "STATS":
+                if self.stats_selected_idx > 0:
+                    self.stats_selected_idx -= 1
+            elif self.view == "WEEKLY":
+                if self.weekly_selected_idx > 0:
+                    self.weekly_selected_idx -= 1
+            elif self.view == "MONTHLY":
+                if self.monthly_selected_idx > 0:
+                    self.monthly_selected_idx -= 1
 
         elif ch in (ord('g'), curses.KEY_HOME):
-            self.selected_idx = 0
+            if self.view == "LOGS":
+                self.selected_idx = 0
+            elif self.view == "STATS":
+                self.stats_selected_idx = 0
+            elif self.view == "WEEKLY":
+                self.weekly_selected_idx = 0
+            elif self.view == "MONTHLY":
+                self.monthly_selected_idx = 0
 
         elif ch in (ord('G'), curses.KEY_END):
-            if self.entries:
-                self.selected_idx = len(self.entries) - 1
+            if self.view == "LOGS":
+                if self.entries:
+                    self.selected_idx = len(self.entries) - 1
+            elif self.view == "STATS":
+                if self.daily_stats:
+                    self.stats_selected_idx = len(self.daily_stats) - 1
+            elif self.view == "WEEKLY":
+                if self.weekly_stats:
+                    self.weekly_selected_idx = len(self.weekly_stats) - 1
+            elif self.view == "MONTHLY":
+                if self.monthly_stats:
+                    self.monthly_selected_idx = len(self.monthly_stats) - 1
 
         elif ch in (ord('x'), curses.KEY_DC):
-            if self.entries and 0 <= self.selected_idx < len(self.entries):
-                target = self.entries[self.selected_idx]
-                self.pending_delete_id = target.id
-                self.mode = "CONFIRM_DELETE"
+            if self.view == "LOGS":
+                if self.entries and 0 <= self.selected_idx < len(self.entries):
+                    target = self.entries[self.selected_idx]
+                    self.pending_delete_id = target.id
+                    self.mode = "CONFIRM_DELETE"
+            else:
+                self.set_status("Cannot delete summary row. Switch to Logs view (1) to delete entries.")
 
         elif ch == ord('r'):
             self.refresh_data()
@@ -798,7 +1534,7 @@ class VLoggerTUI:
 
             # If currently active, update the running timer description in DB immediately
             if self.active_entry:
-                self.db.update_entry(self.active_entry.id, description=new_desc)
+                self.core.update_entry(self.active_entry.id, description=new_desc)
                 self.set_status(f"Updated active task description to: '{new_desc}'")
             else:
                 self.set_status(f"Description set to: '{new_desc}'. Press 's' to start.")

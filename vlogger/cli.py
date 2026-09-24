@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
@@ -15,13 +16,13 @@ from vlogger.tui import launch_tui
 
 def format_table(entries, today_stats):
     lines = []
-    lines.append(f"{'ID':<5} {'START':<16} {'END':<16} {'DURATION':<10} {'DESCRIPTION'}")
+    lines.append(f"{'ID':<5} {'START':^16} {'END':<16} {'DURATION':<10} {'DESCRIPTION'}")
     lines.append("-" * 75)
     for e in entries:
         eid = f"#{e.id}"
         try:
             s_dt = datetime.fromisoformat(e.start_time)
-            s_fmt = s_dt.strftime("%Y-%m-%d %H:%M")
+            s_fmt = s_dt.strftime("%d.%m.%Y %H:%M")
         except Exception:
             s_fmt = e.start_time[:16]
 
@@ -31,7 +32,7 @@ def format_table(entries, today_stats):
         else:
             try:
                 e_dt = datetime.fromisoformat(e.end_time)
-                e_fmt = e_dt.strftime("%Y-%m-%d %H:%M")
+                e_fmt = e_dt.strftime("%d.%m.%Y %H:%M")
             except Exception:
                 e_fmt = "-"
             dur_fmt = TimeEntry.format_duration(e.calculate_duration())
@@ -41,6 +42,155 @@ def format_table(entries, today_stats):
     lines.append("-" * 75)
     today_dur = TimeEntry.format_duration(today_stats["total_seconds"])
     lines.append(f"Today's Total: {today_dur} across {today_stats['count']} entries")
+    return "\n".join(lines)
+
+
+def format_daily_stats_table(days, summary):
+    if not days or (len(days) == 1 and days[0]["count"] == 0):
+        return "No work logs recorded yet. Track some time with 'vlogger start' or 'vlogger add'."
+
+    lines = []
+    lines.append(f"{'DATE':<12} {'DAY':<11} {'DURATION':<10} {'ENTRIES':<9} {'ACTIVITY BAR':<12} {'TOP TASKS'}")
+    lines.append("─" * 80)
+
+    max_sec = max(summary.get("max_day_seconds", 0), 28800)
+
+    for d in days:
+        if d["count"] == 0 and not d["is_today"]:
+            continue
+
+        raw_date = d["date"]
+        try:
+            date_str = datetime.strptime(raw_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+        except Exception:
+            date_str = raw_date
+        day_disp = d["day_abbr"]
+        if d["is_today"]:
+            day_disp += " [Today]"
+        elif d["is_yesterday"]:
+            day_disp += " [Yest]"
+
+        dur_str = TimeEntry.format_duration(d["total_seconds"])
+        cnt_str = f"{d['count']}"
+
+        bar_w = 10
+        ratio = min(1.0, d["total_seconds"] / max_sec) if max_sec > 0 else 0
+        filled = int(round(ratio * bar_w))
+        bar_str = "█" * filled + "░" * (bar_w - filled)
+
+        top_tasks = []
+        for t in d.get("tasks", [])[:3]:
+            dur_c = TimeEntry.format_duration(t["total_seconds"], compact=True)
+            top_tasks.append(f"{t['description']} ({dur_c})")
+        tasks_str = ", ".join(top_tasks) if top_tasks else "-"
+
+        lines.append(f"{date_str:<12} {day_disp:<11} {dur_str:<10} {cnt_str:<9} {bar_str:<12} {tasks_str}")
+
+    lines.append("─" * 80)
+    total_fmt = summary.get("compact_duration", "0s")
+    days_cnt = summary.get("active_days", 0)
+    avg_fmt = summary.get("average_daily_formatted", "0s")
+    peak_d = summary.get("peak_day", "-")
+    try:
+        peak_d = datetime.strptime(peak_d, "%Y-%m-%d").strftime("%d.%m.%Y")
+    except Exception:
+        pass
+    peak_fmt = summary.get("max_day_formatted", "0s")
+    lines.append(f"Summary: {total_fmt} across {days_cnt} active days │ Daily Avg: {avg_fmt} │ Peak: {peak_d} ({peak_fmt})")
+    return "\n".join(lines)
+
+
+def format_weekly_stats_table(weeks, summary):
+    if not weeks or (len(weeks) == 1 and weeks[0]["count"] == 0):
+        return "No work logs recorded yet. Track some time with 'vlogger start' or 'vlogger add'."
+
+    lines = []
+    lines.append(f"{'WEEK':<14} {'DATES':<22} {'DURATION':<10} {'ENTRIES':<9} {'ACTIVITY BAR':<12} {'TOP TASKS'}")
+    lines.append("─" * 85)
+
+    max_sec = max(summary.get("max_week_seconds", 0), 40 * 3600)
+
+    for w in weeks:
+        if w["count"] == 0 and not w["is_current_week"]:
+            continue
+
+        week_disp = w["week"]
+        if w.get("is_current_week"):
+            week_disp += " [Cur]"
+        elif w.get("is_last_week"):
+            week_disp += " [Last]"
+
+        range_str = w.get("range_formatted", "")
+        dur_str = TimeEntry.format_duration(w["total_seconds"])
+        cnt_str = f"{w['count']}"
+
+        bar_w = 10
+        ratio = min(1.0, w["total_seconds"] / max_sec) if max_sec > 0 else 0
+        filled = int(round(ratio * bar_w))
+        bar_str = "█" * filled + "░" * (bar_w - filled)
+
+        top_tasks = []
+        for t in w.get("tasks", [])[:3]:
+            dur_c = TimeEntry.format_duration(t["total_seconds"], compact=True)
+            top_tasks.append(f"{t['description']} ({dur_c})")
+        tasks_str = ", ".join(top_tasks) if top_tasks else "-"
+
+        lines.append(f"{week_disp:<14} {range_str:<22} {dur_str:<10} {cnt_str:<9} {bar_str:<12} {tasks_str}")
+
+    lines.append("─" * 85)
+    total_fmt = summary.get("compact_duration", "0s")
+    weeks_cnt = summary.get("active_weeks", 0)
+    avg_fmt = summary.get("average_weekly_formatted", "0s")
+    peak_w = summary.get("peak_week", "-")
+    peak_fmt = summary.get("max_week_formatted", "0s")
+    lines.append(f"Summary: {total_fmt} across {weeks_cnt} active weeks │ Weekly Avg: {avg_fmt} │ Peak: {peak_w} ({peak_fmt})")
+    return "\n".join(lines)
+
+
+def format_monthly_stats_table(months, summary):
+    if not months or (len(months) == 1 and months[0]["count"] == 0):
+        return "No work logs recorded yet. Track some time with 'vlogger start' or 'vlogger add'."
+
+    lines = []
+    lines.append(f"{'MONTH':<14} {'PERIOD / ACTIVE':<22} {'DURATION':<10} {'ENTRIES':<9} {'ACTIVITY BAR':<12} {'TOP TASKS'}")
+    lines.append("─" * 85)
+
+    max_sec = max(summary.get("max_month_seconds", 0), 160 * 3600)
+
+    for m in months:
+        if m["count"] == 0 and not m["is_current_month"]:
+            continue
+
+        month_disp = m["month"]
+        if m.get("is_current_month"):
+            month_disp += " [Cur]"
+        elif m.get("is_last_month"):
+            month_disp += " [Last]"
+
+        period_str = f"{m.get('month_abbr', m['month'])} ({m.get('active_days_count', 0)}d)"
+        dur_str = TimeEntry.format_duration(m["total_seconds"])
+        cnt_str = f"{m['count']}"
+
+        bar_w = 10
+        ratio = min(1.0, m["total_seconds"] / max_sec) if max_sec > 0 else 0
+        filled = int(round(ratio * bar_w))
+        bar_str = "█" * filled + "░" * (bar_w - filled)
+
+        top_tasks = []
+        for t in m.get("tasks", [])[:3]:
+            dur_c = TimeEntry.format_duration(t["total_seconds"], compact=True)
+            top_tasks.append(f"{t['description']} ({dur_c})")
+        tasks_str = ", ".join(top_tasks) if top_tasks else "-"
+
+        lines.append(f"{month_disp:<14} {period_str:<22} {dur_str:<10} {cnt_str:<9} {bar_str:<12} {tasks_str}")
+
+    lines.append("─" * 85)
+    total_fmt = summary.get("compact_duration", "0s")
+    months_cnt = summary.get("active_months", 0)
+    avg_fmt = summary.get("average_monthly_formatted", "0s")
+    peak_m = summary.get("peak_month", "-")
+    peak_fmt = summary.get("max_month_formatted", "0s")
+    lines.append(f"Summary: {total_fmt} across {months_cnt} active months │ Monthly Avg: {avg_fmt} │ Peak: {peak_m} ({peak_fmt})")
     return "\n".join(lines)
 
 
@@ -88,12 +238,22 @@ def main():
     p_list.add_argument("-p", "--project", help="Filter by project")
 
     # Export
-    p_export = subparsers.add_parser("export", help="Export entries for use in larger systems (JSON, JSONL, CSV)")
-    p_export.add_argument("-f", "--format", choices=["json", "jsonl", "csv"], default="json", help="Export format (default: json)")
+    p_export = subparsers.add_parser("export", help="Export entries for use in larger systems (JSON, JSONL, CSV, HTML)")
+    p_export.add_argument("-f", "--format", choices=["json", "jsonl", "csv", "html"], default="json", help="Export format (default: json)")
     p_export.add_argument("-o", "--out", help="Output file path (prints to stdout if not specified)")
     p_export.add_argument("--since", help="Filter since ISO date/time")
     p_export.add_argument("--until", help="Filter until ISO date/time")
     p_export.add_argument("-p", "--project", help="Filter by project")
+
+    # Static HTML Progress Report
+    p_report = subparsers.add_parser("report", aliases=["html"], help="Generate static HTML progress dashboard")
+    p_report.add_argument("-o", "--out", help="Output file path (default: ~/.local/share/vlogger/ekselek.html)")
+    p_report.add_argument("--open", action="store_true", help="Open generated HTML report in default browser")
+    p_report.add_argument("--stdout", action="store_true", help="Print HTML content directly to stdout")
+
+    # Sync static HTML report to remote
+    p_sync = subparsers.add_parser("sync", help="Regenerate static HTML report and trigger remote sync command")
+    p_sync.add_argument("-o", "--out", help="Output file path (default: ~/.local/share/vlogger/ekselek.html)")
 
     # Edit / Rename
     p_edit = subparsers.add_parser("edit", aliases=["rename"], help="Edit description of an existing entry")
@@ -102,6 +262,32 @@ def main():
 
     # Tasks / Descriptions list
     subparsers.add_parser("tasks", aliases=["descriptions"], help="List unique past task descriptions")
+
+    # Daily, Weekly, and Monthly Stats
+    p_stats = subparsers.add_parser("stats", aliases=["daily"], help="Show daily statistics and work summaries")
+    p_stats.add_argument("-n", "--days", type=int, default=14, help="Number of days to show (default: 14)")
+    p_stats.add_argument("-w", "--weekly", action="store_true", help="Show weekly statistics instead of daily")
+    p_stats.add_argument("-m", "--monthly", action="store_true", help="Show monthly statistics instead of daily")
+    p_stats.add_argument("--weeks", type=int, default=12, help="Number of weeks to show if weekly (default: 12)")
+    p_stats.add_argument("--months", type=int, default=12, help="Number of months to show if monthly (default: 12)")
+    p_stats.add_argument("-p", "--project", help="Filter by project")
+    p_stats.add_argument("--since", help="Filter since ISO date/time")
+    p_stats.add_argument("--until", help="Filter until ISO date/time")
+    p_stats.add_argument("--json", action="store_true", help="Output stats as JSON")
+
+    p_weekly = subparsers.add_parser("weekly", help="Show weekly statistics and work summaries")
+    p_weekly.add_argument("-n", "--weeks", type=int, default=12, help="Number of weeks to show (default: 12)")
+    p_weekly.add_argument("-p", "--project", help="Filter by project")
+    p_weekly.add_argument("--since", help="Filter since ISO date/time")
+    p_weekly.add_argument("--until", help="Filter until ISO date/time")
+    p_weekly.add_argument("--json", action="store_true", help="Output weekly stats as JSON")
+
+    p_monthly = subparsers.add_parser("monthly", help="Show monthly statistics and work summaries")
+    p_monthly.add_argument("-n", "--months", type=int, default=12, help="Number of months to show (default: 12)")
+    p_monthly.add_argument("-p", "--project", help="Filter by project")
+    p_monthly.add_argument("--since", help="Filter since ISO date/time")
+    p_monthly.add_argument("--until", help="Filter until ISO date/time")
+    p_monthly.add_argument("--json", action="store_true", help="Output monthly stats as JSON")
 
     # Config
     p_config = subparsers.add_parser("config", help="Get or set configuration values")
@@ -216,7 +402,7 @@ def main():
         if not new_desc:
             print("Description cannot be empty.")
             sys.exit(1)
-        updated = db.update_entry(args.id, description=new_desc)
+        updated = core.update_entry(args.id, description=new_desc)
         print(f"Updated entry #{updated.id}: '{updated.description}'")
 
     elif args.command in ("tasks", "descriptions"):
@@ -230,6 +416,89 @@ def main():
                 cnt = f"{it['count']}x"
                 last_u = it['last_used'][:16] if it['last_used'] else "-"
                 print(f"{cnt:<7} {last_u:<18} {it['description']}")
+
+    elif args.command in ("stats", "daily", "weekly", "monthly"):
+        is_weekly = (args.command == "weekly") or getattr(args, "weekly", False)
+        is_monthly = (args.command == "monthly") or getattr(args, "monthly", False)
+
+        if is_monthly:
+            months, summary = core.get_monthly_stats(
+                months_limit=getattr(args, "months", 12),
+                since=args.since,
+                until=args.until,
+                project=args.project,
+            )
+            if args.json:
+                json_months = []
+                for m in months:
+                    m_copy = dict(m)
+                    m_copy["entries"] = [e.to_dict() for e in m.get("entries", [])]
+                    json_months.append(m_copy)
+                print(json.dumps({"months": json_months, "summary": summary}, indent=2))
+            else:
+                print(format_monthly_stats_table(months, summary))
+        elif is_weekly:
+            weeks, summary = core.get_weekly_stats(
+                weeks_limit=getattr(args, "weeks", 12),
+                since=args.since,
+                until=args.until,
+                project=args.project,
+            )
+            if args.json:
+                json_weeks = []
+                for w in weeks:
+                    w_copy = dict(w)
+                    w_copy["entries"] = [e.to_dict() for e in w.get("entries", [])]
+                    json_weeks.append(w_copy)
+                print(json.dumps({"weeks": json_weeks, "summary": summary}, indent=2))
+            else:
+                print(format_weekly_stats_table(weeks, summary))
+        else:
+            days, summary = core.get_daily_stats(
+                days_limit=getattr(args, "days", 14),
+                since=args.since,
+                until=args.until,
+                project=args.project,
+            )
+            if args.json:
+                json_days = []
+                for d in days:
+                    d_copy = dict(d)
+                    d_copy["entries"] = [e.to_dict() for e in d.get("entries", [])]
+                    json_days.append(d_copy)
+                print(json.dumps({"days": json_days, "summary": summary}, indent=2))
+            else:
+                print(format_daily_stats_table(days, summary))
+
+    elif args.command in ("report", "html"):
+        if args.stdout:
+            from vlogger.html_report import generate_html_report
+            print(generate_html_report(db))
+        else:
+            from vlogger.html_report import write_html_report
+            target_path = Path(args.out).expanduser().resolve() if args.out else core.html_report_path
+            written = write_html_report(db, file_path=target_path)
+            print(f"Generated static HTML progress report at: {written}")
+            ok, msg = core.sync_html_report(written, wait=True)
+            if ok and "No 'html_sync_cmd'" not in msg:
+                print(f"✓ {msg}")
+            elif not ok and "No 'html_sync_cmd'" not in msg:
+                print(f"Notice: {msg}", file=sys.stderr)
+            if args.open:
+                import webbrowser
+                webbrowser.open(written.as_uri())
+
+    elif args.command == "sync":
+        from vlogger.html_report import write_html_report
+        target_path = Path(args.out).expanduser().resolve() if args.out else core.html_report_path
+        written = write_html_report(db, file_path=target_path)
+        print(f"Generated static HTML report at: {written}")
+        ok, msg = core.sync_html_report(written, wait=True)
+        if ok:
+            print(f"✓ {msg}")
+        else:
+            print(f"✗ {msg}", file=sys.stderr)
+            sys.exit(1)
 
     elif args.command == "config":
         if args.action == "list":

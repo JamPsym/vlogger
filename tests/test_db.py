@@ -101,6 +101,9 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(len(all_entries), 2)
 
         proj1_entries = self.db.list_entries(project="proj1")
+        self.assertEqual(len(proj1_entries), 1)
+        self.assertEqual(proj1_entries[0].description, "Task A")
+
     def test_get_last_description_and_recent(self):
         self.assertIsNone(self.db.get_last_description())
         self.assertEqual(len(self.db.get_recent_descriptions()), 0)
@@ -119,6 +122,93 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(recent[0]["count"], 2)
         self.assertEqual(recent[1]["description"], "Task Y")
         self.assertEqual(recent[1]["count"], 1)
+
+    def test_get_daily_stats(self):
+        t1 = datetime(2026, 9, 20, 9, 0, 0)
+        t2 = datetime(2026, 9, 21, 10, 0, 0)
+        t3 = datetime(2026, 9, 21, 14, 0, 0)
+
+        self.db.add_manual_entry("Coding", 3600, start_dt=t1, project="backend")
+        self.db.add_manual_entry("Code Review", 1800, start_dt=t2, project="reviews")
+        self.db.add_manual_entry("Coding", 5400, start_dt=t3, project="backend")
+
+        # Call get_daily_stats with include_today=False
+        stats = self.db.get_daily_stats(include_today=False)
+        self.assertEqual(len(stats), 2)
+
+        # Most recent date first: 2026-09-21
+        day_21 = stats[0]
+        self.assertEqual(day_21["date"], "2026-09-21")
+        self.assertEqual(day_21["day_name"], "Monday")
+        self.assertEqual(day_21["total_seconds"], 7200) # 1800 + 5400
+        self.assertEqual(day_21["count"], 2)
+        self.assertEqual(len(day_21["tasks"]), 2)
+        self.assertEqual(day_21["tasks"][0]["description"], "Coding")
+        self.assertEqual(day_21["tasks"][0]["total_seconds"], 5400)
+        self.assertEqual(day_21["tasks"][0]["percentage"], 75.0)
+        self.assertEqual(day_21["tasks"][1]["description"], "Code Review")
+        self.assertEqual(day_21["tasks"][1]["total_seconds"], 1800)
+        self.assertEqual(day_21["tasks"][1]["percentage"], 25.0)
+
+        # 2026-09-20
+        day_20 = stats[1]
+        self.assertEqual(day_20["date"], "2026-09-20")
+        self.assertEqual(day_20["total_seconds"], 3600)
+        self.assertEqual(day_20["count"], 1)
+
+        # Filter by project
+        stats_backend = self.db.get_daily_stats(project="backend", include_today=False)
+        self.assertEqual(len(stats_backend), 2)
+        self.assertEqual(stats_backend[0]["total_seconds"], 5400)
+        self.assertEqual(stats_backend[1]["total_seconds"], 3600)
+
+    def test_get_weekly_stats(self):
+        # 2026-09-14 is Monday of W38
+        # 2026-09-21 is Monday of W39
+        t1 = datetime(2026, 9, 15, 9, 0, 0)
+        t2 = datetime(2026, 9, 21, 10, 0, 0)
+        t3 = datetime(2026, 9, 22, 14, 0, 0)
+
+        self.db.add_manual_entry("Sprint 1 Task", 3600, start_dt=t1, project="backend")
+        self.db.add_manual_entry("Sprint 2 Task 1", 1800, start_dt=t2, project="reviews")
+        self.db.add_manual_entry("Sprint 2 Task 2", 5400, start_dt=t3, project="backend")
+
+        weeks = self.db.get_weekly_stats(include_current_week=False)
+        self.assertEqual(len(weeks), 2)
+
+        # Most recent week: 2026-W39
+        w39 = weeks[0]
+        self.assertEqual(w39["week"], "2026-W39")
+        self.assertEqual(w39["total_seconds"], 7200)
+        self.assertEqual(w39["count"], 2)
+        self.assertEqual(w39["active_days_count"], 2)
+        self.assertEqual(len(w39["days_breakdown"]), 2)
+
+        # 2026-W38
+        w38 = weeks[1]
+        self.assertEqual(w38["week"], "2026-W38")
+        self.assertEqual(w38["total_seconds"], 3600)
+        self.assertEqual(w38["count"], 1)
+
+    def test_get_monthly_stats(self):
+        t1 = datetime(2026, 8, 20, 9, 0, 0)
+        t2 = datetime(2026, 9, 21, 10, 0, 0)
+
+        self.db.add_manual_entry("August Task", 3600, start_dt=t1)
+        self.db.add_manual_entry("September Task", 1800, start_dt=t2)
+
+        months = self.db.get_monthly_stats(include_current_month=False)
+        self.assertEqual(len(months), 2)
+
+        m_sep = months[0]
+        self.assertEqual(m_sep["month"], "2026-09")
+        self.assertIn("September", m_sep["month_name"])
+        self.assertEqual(m_sep["total_seconds"], 1800)
+
+        m_aug = months[1]
+        self.assertEqual(m_aug["month"], "2026-08")
+        self.assertIn("August", m_aug["month_name"])
+        self.assertEqual(m_aug["total_seconds"], 3600)
 
 
 if __name__ == "__main__":
