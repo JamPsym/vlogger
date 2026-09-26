@@ -8,6 +8,7 @@ import curses
 import os
 import sys
 import time
+import unicodedata
 from datetime import datetime
 from typing import Optional, List
 
@@ -17,6 +18,45 @@ from vlogger.core import VLoggerCore
 
 
 class VLoggerTUI:
+    @staticmethod
+    def _cell_width(char: str) -> int:
+        return 0 if unicodedata.combining(char) else (2 if unicodedata.east_asian_width(char) in "WF" else 1)
+
+    @staticmethod
+    def _fit_text(value: str, width: int, pad: bool = False) -> str:
+        """Fit text to terminal cells, including wide and combining characters."""
+        used = 0
+        result = []
+        for char in value:
+            if not char.isprintable():
+                char = " "
+            cells = VLoggerTUI._cell_width(char)
+            if used + cells > width:
+                break
+            result.append(char)
+            used += cells
+        if pad:
+            result.append(" " * max(0, width - used))
+        return "".join(result)
+
+    @staticmethod
+    def _field_view(value: str, cursor: int, width: int):
+        """Keep the cursor visible while editing a description longer than its field."""
+        cursor = max(0, min(cursor, len(value)))
+        start = cursor
+        used = 0
+        while start > 0:
+            cells = VLoggerTUI._cell_width(value[start - 1])
+            if used + cells >= width:
+                break
+            start -= 1
+            used += cells
+        return VLoggerTUI._fit_text(value[start:], width), used
+
+    @staticmethod
+    def _modal_width(preferred: int, screen_width: int) -> int:
+        return screen_width - 2 if screen_width <= preferred + 8 else preferred
+
     def __init__(self, db: Optional[Database] = None):
         self.db = db or Database()
         self.core = VLoggerCore(self.db)
@@ -32,6 +72,10 @@ class VLoggerTUI:
         self.history_offset = 0
         self.entries: List[TimeEntry] = []
         self.active_entry: Optional[TimeEntry] = None
+        self.today_stats = {"total_seconds": 0, "count": 0}
+        self._today_stats_at = time.monotonic()
+        self._last_stats_refresh = 0.0
+        self._stats_date = None
 
         self.stats_selected_idx = 0
         self.stats_offset = 0
@@ -67,14 +111,30 @@ class VLoggerTUI:
         self.status_message = msg
         self.status_message_time = time.time() + duration
 
-    def refresh_data(self):
-        """Reload active entry, recent entries, daily, weekly, and monthly stats from SQLite."""
+    def refresh_data(self, full: bool = True):
+        """Reload timer state; rebuild aggregates when data or the day changes."""
+        previous = [(e.id, e.updated_at, e.end_time) for e in self.entries]
+        previous_active = self.active_entry.id if self.active_entry else None
         self.active_entry = self.db.get_active_entry()
         self.entries = self.db.list_entries(limit=50)
-        self.default_desc = self.core.default_description
-        self.daily_stats, self.daily_summary = self.core.get_daily_stats(days_limit=30)
-        self.weekly_stats, self.weekly_summary = self.core.get_weekly_stats(weeks_limit=26)
-        self.monthly_stats, self.monthly_summary = self.core.get_monthly_stats(months_limit=12)
+        self.selected_idx = min(self.selected_idx, max(0, len(self.entries) - 1))
+        current = [(e.id, e.updated_at, e.end_time) for e in self.entries]
+        active_id = self.active_entry.id if self.active_entry else None
+        full = (full or current != previous or active_id != previous_active or
+                self._stats_date != datetime.now().date())
+        if full:
+            self.default_desc = self.core.default_description
+            stats_entries = self.db._stats_entries()
+            self.today_stats = self.db.get_stats_for_today(entries_override=stats_entries)
+            self._today_stats_at = time.monotonic()
+            self.daily_stats = self.db.get_daily_stats(days_limit=30, entries_override=stats_entries)
+            self.daily_summary = VLoggerCore.calculate_daily_summary(self.daily_stats)
+            self.weekly_stats = self.db.get_weekly_stats(weeks_limit=26, entries_override=stats_entries)
+            self.weekly_summary = VLoggerCore.calculate_weekly_summary(self.weekly_stats)
+            self.monthly_stats = self.db.get_monthly_stats(months_limit=12, entries_override=stats_entries)
+            self.monthly_summary = VLoggerCore.calculate_monthly_summary(self.monthly_stats)
+            self._last_stats_refresh = time.monotonic()
+            self._stats_date = datetime.now().date()
 
         if self.stats_selected_idx >= len(self.daily_stats) and self.daily_stats:
             self.stats_selected_idx = len(self.daily_stats) - 1
@@ -169,8 +229,7 @@ class VLoggerTUI:
             # Draw title
             if title:
                 t = f" {title} "
-                if len(t) < w - 4:
-                    stdscr.addstr(y, x + 2, t, attr | curses.A_BOLD)
+                stdscr.addstr(y, x + 2, self._fit_text(t, w - 4), attr | curses.A_BOLD)
         except curses.error:
             pass
 
@@ -179,7 +238,7 @@ class VLoggerTUI:
         stdscr.timeout(500)  # 500ms timeout for non-blocking key reads & timer ticking
 
         while True:
-            self.refresh_data()
+            self.refresh_data(full=time.monotonic() - self._last_stats_refresh >= 5)
             stdscr.erase()
             max_y, max_x = stdscr.getmaxyx()
 
@@ -190,7 +249,11 @@ class VLoggerTUI:
                     stdscr.addstr(0, 0, msg[:max_x - 1], curses.color_pair(3) | curses.A_BOLD)
                 except curses.error:
                     pass
-                ch = stdscr.getch()
+                try:
+                    raw = stdscr.get_wch()
+                    ch = ord(raw) if isinstance(raw, str) and ord(raw) < 256 else raw
+                except curses.error:
+                    continue
                 if ch in (ord('q'), ord('Q')):
                     break
                 continue
@@ -222,8 +285,10 @@ class VLoggerTUI:
             stdscr.refresh()
 
             # Handle Input
-            ch = stdscr.getch()
-            if ch == curses.ERR:
+            try:
+                raw = stdscr.get_wch()
+                ch = ord(raw) if isinstance(raw, str) and ord(raw) < 256 else raw
+            except curses.error:
                 continue
 
             if self.mode == "HELP":
@@ -299,7 +364,10 @@ class VLoggerTUI:
                 try:
                     s_dt = datetime.fromisoformat(self.active_entry.start_time)
                     started_str = f"(since {s_dt.strftime('%H:%M:%S')})"
-                    stdscr.addstr(box_y + 1, box_x + 38, started_str[:max_x - box_x - 40], curses.color_pair(9) | curses.A_DIM)
+                    started_x = box_x + 38
+                    available = box_x + box_w - 1 - started_x
+                    if available > 0:
+                        stdscr.addstr(box_y + 1, started_x, self._fit_text(started_str, available), curses.color_pair(9) | curses.A_DIM)
                 except Exception:
                     pass
         except curses.error:
@@ -310,22 +378,22 @@ class VLoggerTUI:
         field_x = box_x + 3 + len(desc_label)
         field_w = max(10, box_w - len(desc_label) - 6)
         
-        display_desc = self.desc_buffer
-        if len(display_desc) > field_w:
-            display_desc = display_desc[-(field_w - 1):]
+        display_desc, cursor_in_field = self._field_view(self.desc_buffer, self.cursor_pos, field_w)
 
         try:
             stdscr.addstr(box_y + 3, box_x + 3, desc_label, curses.color_pair(9) | curses.A_BOLD)
             field_attr = curses.color_pair(7) if self.mode == "INSERT" else curses.color_pair(9) | curses.A_UNDERLINE
             
             # Draw input field area
-            padded_text = display_desc.ljust(field_w)
-            stdscr.addstr(box_y + 3, field_x, padded_text[:field_w], field_attr)
+            stdscr.addstr(box_y + 3, field_x, self._fit_text(display_desc, field_w, pad=True), field_attr)
             
             if self.mode == "INSERT":
                 # Show cursor inside field
-                cursor_disp_x = field_x + min(self.cursor_pos, field_w - 1)
-                stdscr.addch(box_y + 3, cursor_disp_x, ' ' if self.cursor_pos >= len(self.desc_buffer) else self.desc_buffer[self.cursor_pos], curses.A_REVERSE | curses.A_BLINK)
+                cursor_disp_x = field_x + cursor_in_field
+                char_under = ' ' if self.cursor_pos >= len(self.desc_buffer) else self.desc_buffer[self.cursor_pos]
+                if self._cell_width(char_under) > field_w - cursor_in_field:
+                    char_under = ' '
+                stdscr.addch(box_y + 3, cursor_disp_x, char_under, curses.A_REVERSE | curses.A_BLINK)
         except curses.error:
             pass
 
@@ -372,7 +440,10 @@ class VLoggerTUI:
         # Header columns
         col_start = box_x + 2
         try:
-            header_str = f"  {'ID':<5} {'START':^11} {'END':<10} {'DURATION':<10} {'DESCRIPTION'}"
+            if box_w < 65:
+                header_str = f"  {'ID':<5} {'START':<11} {'DURATION':<8} {'DESCRIPTION'}"
+            else:
+                header_str = f"  {'ID':<5} {'START':^11} {'END':<10} {'DURATION':<10} {'DESCRIPTION'}"
             stdscr.addstr(box_y + 1, col_start, header_str[:box_w - 4], curses.color_pair(1) | curses.A_BOLD)
             stdscr.addstr(box_y + 2, col_start, "─" * (box_w - 4), curses.color_pair(1) | curses.A_DIM)
         except curses.error:
@@ -381,7 +452,7 @@ class VLoggerTUI:
         visible_rows = box_h - 4
         if not self.entries:
             try:
-                stdscr.addstr(box_y + 3, col_start + 2, "No entries yet. Press 's' to start tracking your work!", curses.color_pair(9) | curses.A_DIM)
+                stdscr.addstr(box_y + 3, col_start, self._fit_text("No entries yet. Press 's' to start tracking your work!", box_w - 4), curses.color_pair(9) | curses.A_DIM)
             except curses.error:
                 pass
             return
@@ -422,7 +493,10 @@ class VLoggerTUI:
                 dur_fmt = TimeEntry.format_duration(entry.calculate_duration())
 
             desc = entry.description
-            row_str = f"{'>' if is_sel else ' '} {eid:<5} {start_fmt:<11} {end_fmt:<10} {dur_fmt:<10} {desc}"
+            if box_w < 65:
+                row_str = f"{'>' if is_sel else ' '} {eid:<5} {start_fmt:<11} {dur_fmt:<8} {desc}"
+            else:
+                row_str = f"{'>' if is_sel else ' '} {eid:<5} {start_fmt:<11} {end_fmt:<10} {dur_fmt:<10} {desc}"
 
             row_y = box_y + 3 + row_i
             attr = curses.color_pair(7) | curses.A_BOLD if is_sel else curses.color_pair(9)
@@ -431,18 +505,18 @@ class VLoggerTUI:
             
             try:
                 # Clear row and write
-                stdscr.addstr(row_y, col_start, row_str[:box_w - 4].ljust(box_w - 4), attr)
+                stdscr.addstr(row_y, col_start, self._fit_text(row_str, box_w - 4, pad=True), attr)
             except curses.error:
                 pass
 
     def _render_box_tabs(self, stdscr, box_y: int, box_x: int, box_w: int):
         """Draw interactive view tabs onto the top border of the lower panel."""
-        tabs = [
-            ("LOGS", " [1: Logs] "),
-            ("STATS", " [2: Daily] "),
-            ("WEEKLY", " [3: Weekly] "),
-            ("MONTHLY", " [4: Monthly] "),
-        ]
+        if box_w < 70:
+            tabs = [("LOGS", " [1:Log] "), ("STATS", " [2:Day] "),
+                    ("WEEKLY", " [3:Wk] "), ("MONTHLY", " [4:Mo] ")]
+        else:
+            tabs = [("LOGS", " [1: Logs] "), ("STATS", " [2: Daily] "),
+                    ("WEEKLY", " [3: Weekly] "), ("MONTHLY", " [4: Monthly] ")]
 
         attr_active = curses.color_pair(7) | curses.A_BOLD
         attr_inactive = curses.color_pair(1)
@@ -450,14 +524,18 @@ class VLoggerTUI:
         try:
             cur_x = box_x + 2
             for view_key, tab_label in tabs:
+                if cur_x + len(tab_label) >= box_x + box_w - 1:
+                    break
                 attr = attr_active if self.view == view_key else attr_inactive
                 stdscr.addstr(box_y, cur_x, tab_label, attr)
                 cur_x += len(tab_label) + 1
 
             if self.view == "LOGS":
-                today_stats = self.db.get_stats_for_today()
-                dur_str = TimeEntry.format_duration(today_stats["total_seconds"])
-                info = f"── (Today: {dur_str} in {today_stats['count']} entries)"
+                today_seconds = self.today_stats["total_seconds"]
+                if self.active_entry and self.today_stats["count"]:
+                    today_seconds += max(0, int(time.monotonic() - self._today_stats_at))
+                dur_str = TimeEntry.format_duration(today_seconds)
+                info = f"── (Today: {dur_str} in {self.today_stats['count']} entries)"
             elif self.view == "STATS":
                 tot_str = self.daily_summary.get("compact_duration", "0s")
                 days_cnt = self.daily_summary.get("active_days", 0)
@@ -487,6 +565,9 @@ class VLoggerTUI:
 
         self._draw_box(stdscr, box_y, box_x, box_h, box_w, title="", color_pair=1)
         self._render_box_tabs(stdscr, box_y, box_x, box_w)
+        compact_height = box_h < 7
+        header_y = box_y + (1 if compact_height else 3)
+        first_row_y = header_y + 1
 
         col_start = box_x + 2
         total_str = self.daily_summary.get("compact_duration", "0s")
@@ -501,11 +582,12 @@ class VLoggerTUI:
 
         # Top summary stats line
         summary_line = f"  Total: {total_str} across {active_days} active days  │  Daily Avg: {avg_str}  │  Peak: {peak_day} ({peak_str})"
-        try:
-            stdscr.addstr(box_y + 1, col_start, summary_line[:box_w - 4], curses.color_pair(4) | curses.A_BOLD)
-            stdscr.addstr(box_y + 2, col_start, "─" * (box_w - 4), curses.color_pair(1) | curses.A_DIM)
-        except curses.error:
-            pass
+        if not compact_height:
+            try:
+                stdscr.addstr(box_y + 1, col_start, self._fit_text(summary_line, box_w - 4), curses.color_pair(4) | curses.A_BOLD)
+                stdscr.addstr(box_y + 2, col_start, "─" * (box_w - 4), curses.color_pair(1) | curses.A_DIM)
+            except curses.error:
+                pass
 
         # Columns header
         if box_w >= 85:
@@ -516,13 +598,13 @@ class VLoggerTUI:
             header_str = f"  {'DATE':<11} {'DUR':<8} {'#':<4} {'TASKS'}"
 
         try:
-            stdscr.addstr(box_y + 3, col_start, header_str[:box_w - 4], curses.color_pair(1) | curses.A_BOLD)
+            stdscr.addstr(header_y, col_start, self._fit_text(header_str, box_w - 4), curses.color_pair(1) | curses.A_BOLD)
         except curses.error:
             pass
 
         if not self.daily_stats or (len(self.daily_stats) == 1 and self.daily_stats[0]["count"] == 0):
             try:
-                stdscr.addstr(box_y + 5, col_start + 2, "No entries yet. Press 's' to start tracking your work!", curses.color_pair(9) | curses.A_DIM)
+                stdscr.addstr(first_row_y, col_start, self._fit_text("No entries yet. Press 's' to start tracking your work!", box_w - 4), curses.color_pair(9) | curses.A_DIM)
             except curses.error:
                 pass
             return
@@ -532,7 +614,7 @@ class VLoggerTUI:
             panel_height = 4  # 1 separator row + 3 task breakdown rows
             days_table_rows = max(3, box_h - 4 - panel_height - 1)
         else:
-            days_table_rows = max(1, box_h - 5)
+            days_table_rows = max(1, box_h - (3 if compact_height else 5))
 
         # Adjust scrolling
         if self.stats_selected_idx < self.stats_offset:
@@ -582,13 +664,13 @@ class VLoggerTUI:
             else:
                 row_str = f"{'>' if is_sel else ' '} {date_str[:5]} {dur_str:<8} {d['count']:<4} {top_tasks_str}"
 
-            row_y = box_y + 4 + row_i
+            row_y = first_row_y + row_i
             attr = curses.color_pair(7) | curses.A_BOLD if is_sel else curses.color_pair(9)
             if d["has_active"] and not is_sel:
                 attr = curses.color_pair(2) | curses.A_BOLD
 
             try:
-                stdscr.addstr(row_y, col_start, row_str[:box_w - 4].ljust(box_w - 4), attr)
+                stdscr.addstr(row_y, col_start, self._fit_text(row_str, box_w - 4, pad=True), attr)
             except curses.error:
                 pass
 
@@ -616,7 +698,7 @@ class VLoggerTUI:
                     cnt = t["count"]
                     t_line = f"  • {t['description']}: {dur_fmt} ({pct}%) ─ {cnt} session{'s' if cnt > 1 else ''}"
                     try:
-                        stdscr.addstr(cur_y, col_start, t_line[:box_w - 4].ljust(box_w - 4), curses.color_pair(9))
+                        stdscr.addstr(cur_y, col_start, self._fit_text(t_line, box_w - 4, pad=True), curses.color_pair(9))
                     except curses.error:
                         pass
                 elif ti == 0 and not tasks:
@@ -636,6 +718,9 @@ class VLoggerTUI:
 
         self._draw_box(stdscr, box_y, box_x, box_h, box_w, title="", color_pair=1)
         self._render_box_tabs(stdscr, box_y, box_x, box_w)
+        compact_height = box_h < 7
+        header_y = box_y + (1 if compact_height else 3)
+        first_row_y = header_y + 1
 
         col_start = box_x + 2
         total_str = self.weekly_summary.get("compact_duration", "0s")
@@ -646,11 +731,12 @@ class VLoggerTUI:
 
         # Top summary stats line
         summary_line = f"  Total: {total_str} across {active_weeks} active weeks  │  Weekly Avg: {avg_str}  │  Peak: {peak_week} ({peak_str})"
-        try:
-            stdscr.addstr(box_y + 1, col_start, summary_line[:box_w - 4], curses.color_pair(4) | curses.A_BOLD)
-            stdscr.addstr(box_y + 2, col_start, "─" * (box_w - 4), curses.color_pair(1) | curses.A_DIM)
-        except curses.error:
-            pass
+        if not compact_height:
+            try:
+                stdscr.addstr(box_y + 1, col_start, self._fit_text(summary_line, box_w - 4), curses.color_pair(4) | curses.A_BOLD)
+                stdscr.addstr(box_y + 2, col_start, "─" * (box_w - 4), curses.color_pair(1) | curses.A_DIM)
+            except curses.error:
+                pass
 
         # Columns header
         if box_w >= 85:
@@ -661,13 +747,13 @@ class VLoggerTUI:
             header_str = f"  {'WEEK':<10} {'DUR':<8} {'#':<4} {'TASKS'}"
 
         try:
-            stdscr.addstr(box_y + 3, col_start, header_str[:box_w - 4], curses.color_pair(1) | curses.A_BOLD)
+            stdscr.addstr(header_y, col_start, self._fit_text(header_str, box_w - 4), curses.color_pair(1) | curses.A_BOLD)
         except curses.error:
             pass
 
         if not self.weekly_stats or (len(self.weekly_stats) == 1 and self.weekly_stats[0]["count"] == 0):
             try:
-                stdscr.addstr(box_y + 5, col_start + 2, "No weekly entries yet. Track time to see weekly statistics!", curses.color_pair(9) | curses.A_DIM)
+                stdscr.addstr(first_row_y, col_start, self._fit_text("No weekly entries yet. Track time to see weekly statistics!", box_w - 4), curses.color_pair(9) | curses.A_DIM)
             except curses.error:
                 pass
             return
@@ -677,7 +763,7 @@ class VLoggerTUI:
             panel_height = 4  # 1 separator row + 3 task breakdown rows
             table_rows = max(3, box_h - 4 - panel_height - 1)
         else:
-            table_rows = max(1, box_h - 5)
+            table_rows = max(1, box_h - (3 if compact_height else 5))
 
         # Adjust scrolling
         if self.weekly_selected_idx < self.weekly_offset:
@@ -721,15 +807,15 @@ class VLoggerTUI:
             elif box_w >= 65:
                 row_str = f"{'>' if is_sel else ' '} {week_disp:<12} {range_disp:<18} {dur_str:<10} {w['count']:<5} {top_tasks_str}"
             else:
-                row_str = f"{'>' if is_sel else ' '} {week_disp:<10} {dur_str:<8} {w['count']:<4} {top_tasks_str}"
+                row_str = f"{'>' if is_sel else ' '} {w['week']:<10} {dur_str:<8} {w['count']:<4} {top_tasks_str}"
 
-            row_y = box_y + 4 + row_i
+            row_y = first_row_y + row_i
             attr = curses.color_pair(7) | curses.A_BOLD if is_sel else curses.color_pair(9)
             if w.get("has_active") and not is_sel:
                 attr = curses.color_pair(2) | curses.A_BOLD
 
             try:
-                stdscr.addstr(row_y, col_start, row_str[:box_w - 4].ljust(box_w - 4), attr)
+                stdscr.addstr(row_y, col_start, self._fit_text(row_str, box_w - 4, pad=True), attr)
             except curses.error:
                 pass
 
@@ -757,7 +843,7 @@ class VLoggerTUI:
                     cnt = t["count"]
                     t_line = f"  • {t['description']}: {dur_fmt} ({pct}%) ─ {cnt} session{'s' if cnt > 1 else ''}"
                     try:
-                        stdscr.addstr(cur_y, col_start, t_line[:box_w - 4].ljust(box_w - 4), curses.color_pair(9))
+                        stdscr.addstr(cur_y, col_start, self._fit_text(t_line, box_w - 4, pad=True), curses.color_pair(9))
                     except curses.error:
                         pass
                 elif ti == 0 and not tasks:
@@ -777,6 +863,9 @@ class VLoggerTUI:
 
         self._draw_box(stdscr, box_y, box_x, box_h, box_w, title="", color_pair=1)
         self._render_box_tabs(stdscr, box_y, box_x, box_w)
+        compact_height = box_h < 7
+        header_y = box_y + (1 if compact_height else 3)
+        first_row_y = header_y + 1
 
         col_start = box_x + 2
         total_str = self.monthly_summary.get("compact_duration", "0s")
@@ -787,11 +876,12 @@ class VLoggerTUI:
 
         # Top summary stats line
         summary_line = f"  Total: {total_str} across {active_months} active months  │  Monthly Avg: {avg_str}  │  Peak: {peak_month} ({peak_str})"
-        try:
-            stdscr.addstr(box_y + 1, col_start, summary_line[:box_w - 4], curses.color_pair(4) | curses.A_BOLD)
-            stdscr.addstr(box_y + 2, col_start, "─" * (box_w - 4), curses.color_pair(1) | curses.A_DIM)
-        except curses.error:
-            pass
+        if not compact_height:
+            try:
+                stdscr.addstr(box_y + 1, col_start, self._fit_text(summary_line, box_w - 4), curses.color_pair(4) | curses.A_BOLD)
+                stdscr.addstr(box_y + 2, col_start, "─" * (box_w - 4), curses.color_pair(1) | curses.A_DIM)
+            except curses.error:
+                pass
 
         # Columns header
         if box_w >= 85:
@@ -802,13 +892,13 @@ class VLoggerTUI:
             header_str = f"  {'MONTH':<10} {'DUR':<8} {'#':<4} {'TASKS'}"
 
         try:
-            stdscr.addstr(box_y + 3, col_start, header_str[:box_w - 4], curses.color_pair(1) | curses.A_BOLD)
+            stdscr.addstr(header_y, col_start, self._fit_text(header_str, box_w - 4), curses.color_pair(1) | curses.A_BOLD)
         except curses.error:
             pass
 
         if not self.monthly_stats or (len(self.monthly_stats) == 1 and self.monthly_stats[0]["count"] == 0):
             try:
-                stdscr.addstr(box_y + 5, col_start + 2, "No monthly entries yet. Track time to see monthly statistics!", curses.color_pair(9) | curses.A_DIM)
+                stdscr.addstr(first_row_y, col_start, self._fit_text("No monthly entries yet. Track time to see monthly statistics!", box_w - 4), curses.color_pair(9) | curses.A_DIM)
             except curses.error:
                 pass
             return
@@ -818,7 +908,7 @@ class VLoggerTUI:
             panel_height = 4  # 1 separator row + 3 task breakdown rows
             table_rows = max(3, box_h - 4 - panel_height - 1)
         else:
-            table_rows = max(1, box_h - 5)
+            table_rows = max(1, box_h - (3 if compact_height else 5))
 
         # Adjust scrolling
         if self.monthly_selected_idx < self.monthly_offset:
@@ -862,15 +952,15 @@ class VLoggerTUI:
             elif box_w >= 65:
                 row_str = f"{'>' if is_sel else ' '} {month_disp:<12} {period_disp:<18} {dur_str:<10} {m['count']:<5} {top_tasks_str}"
             else:
-                row_str = f"{'>' if is_sel else ' '} {month_disp:<10} {dur_str:<8} {m['count']:<4} {top_tasks_str}"
+                row_str = f"{'>' if is_sel else ' '} {m['month']:<10} {dur_str:<8} {m['count']:<4} {top_tasks_str}"
 
-            row_y = box_y + 4 + row_i
+            row_y = first_row_y + row_i
             attr = curses.color_pair(7) | curses.A_BOLD if is_sel else curses.color_pair(9)
             if m.get("has_active") and not is_sel:
                 attr = curses.color_pair(2) | curses.A_BOLD
 
             try:
-                stdscr.addstr(row_y, col_start, row_str[:box_w - 4].ljust(box_w - 4), attr)
+                stdscr.addstr(row_y, col_start, self._fit_text(row_str, box_w - 4, pad=True), attr)
             except curses.error:
                 pass
 
@@ -898,7 +988,7 @@ class VLoggerTUI:
                     cnt = t["count"]
                     t_line = f"  • {t['description']}: {dur_fmt} ({pct}%) ─ {cnt} session{'s' if cnt > 1 else ''}"
                     try:
-                        stdscr.addstr(cur_y, col_start, t_line[:box_w - 4].ljust(box_w - 4), curses.color_pair(9))
+                        stdscr.addstr(cur_y, col_start, self._fit_text(t_line, box_w - 4, pad=True), curses.color_pair(9))
                     except curses.error:
                         pass
                 elif ti == 0 and not tasks:
@@ -912,7 +1002,7 @@ class VLoggerTUI:
             self.mode = "NORMAL"
             return
 
-        modal_w = min(74, max_x - 4)
+        modal_w = self._modal_width(74, max_x)
         modal_h = min(20, max_y - 2)
         modal_y = (max_y - modal_h) // 2
         modal_x = (max_x - modal_w) // 2
@@ -986,14 +1076,14 @@ class VLoggerTUI:
                 e_line = f"  {eid:<5} {s_fmt:<8} {e_fmt:<8} {e_dur:<9} {e.description}"
                 row_y = modal_y + 5 + ei
                 attr = curses.color_pair(2) if e.is_active else curses.color_pair(10)
-                stdscr.addstr(row_y, modal_x + 3, e_line[:modal_w - 6].ljust(modal_w - 6), attr)
+                stdscr.addstr(row_y, modal_x + 3, self._fit_text(e_line, modal_w - 6, pad=True), attr)
 
             # Task breakdown footer
             tasks_y = modal_y + 5 + visible_entries + 1
             if tasks_y < modal_y + modal_h - 2:
                 tasks_info = ", ".join(f"{t['description']} ({t['percentage']}%)" for t in d.get("tasks", [])[:3])
                 if tasks_info:
-                    stdscr.addstr(tasks_y, modal_x + 3, ("Tasks: " + tasks_info)[:modal_w - 6], curses.color_pair(10) | curses.A_DIM)
+                    stdscr.addstr(tasks_y, modal_x + 3, self._fit_text("Tasks: " + tasks_info, modal_w - 6), curses.color_pair(10) | curses.A_DIM)
 
             hint = "Press Esc, Enter, Space, or q to close"
             stdscr.addstr(modal_y + modal_h - 2, modal_x + (modal_w - len(hint)) // 2, hint, curses.color_pair(13) | curses.A_DIM)
@@ -1040,13 +1130,14 @@ class VLoggerTUI:
 
         try:
             stdscr.addstr(footer_y, 2, mode_str, mode_color)
-            stdscr.addstr(footer_y, 16, display_msg[:max_x - 18], curses.color_pair(9))
+            message_x = max(16, len(mode_str) + 4)
+            stdscr.addstr(footer_y, message_x, self._fit_text(display_msg, max_x - message_x - 2), curses.color_pair(9))
         except curses.error:
             pass
 
     def _render_help_modal(self, stdscr, max_y: int, max_x: int):
-        modal_w = min(68, max_x - 6)
-        modal_h = 20
+        modal_w = self._modal_width(68, max_x)
+        modal_h = min(20, max_y - 2)
         modal_y = (max_y - modal_h) // 2
         modal_x = (max_x - modal_w) // 2
 
@@ -1081,12 +1172,25 @@ class VLoggerTUI:
             ("q", "Quit TUI (active timer continues in background)"),
             ("?", "Toggle this help modal"),
         ]
+        if max_x < 70:
+            lines = [
+                ("h/l or ←/→", "Switch views"),
+                ("Tab / v", "Next view; Shift-Tab: back"),
+                ("1 / 2 / 3 / 4", "Open a view directly"),
+                ("s / Space", "Start or stop timer"),
+                ("i / a", "Edit task description"),
+                ("p", "Pick a past task"),
+                ("j/k or ↓/↑", "Move selection"),
+                ("Enter / e", "Edit entry or show details"),
+                ("x", "Delete selected log"),
+                ("?", "Close help"),
+            ]
 
         try:
             for i, (key, desc) in enumerate(lines[:modal_h - 4]):
                 row_y = modal_y + 2 + i
                 stdscr.addstr(row_y, modal_x + 3, f"{key:<15}", curses.color_pair(11) | curses.A_BOLD)
-                stdscr.addstr(row_y, modal_x + 19, desc[:modal_w - 22], curses.color_pair(10))
+                stdscr.addstr(row_y, modal_x + 19, self._fit_text(desc, modal_w - 22), curses.color_pair(10))
             
             hint = "Press Esc, Space, or q to close"
             stdscr.addstr(modal_y + modal_h - 2, modal_x + (modal_w - len(hint)) // 2, hint, curses.color_pair(13) | curses.A_DIM)
@@ -1094,7 +1198,7 @@ class VLoggerTUI:
             pass
 
     def _render_confirm_delete_modal(self, stdscr, max_y: int, max_x: int):
-        modal_w = min(50, max_x - 6)
+        modal_w = self._modal_width(50, max_x)
         modal_h = 7
         modal_y = (max_y - modal_h) // 2
         modal_x = (max_x - modal_w) // 2
@@ -1119,7 +1223,7 @@ class VLoggerTUI:
             pass
 
     def _render_edit_history_modal(self, stdscr, max_y: int, max_x: int):
-        modal_w = min(68, max_x - 6)
+        modal_w = self._modal_width(68, max_x)
         modal_h = 8
         modal_y = (max_y - modal_h) // 2
         modal_x = (max_x - modal_w) // 2
@@ -1140,19 +1244,18 @@ class VLoggerTUI:
         field_x = modal_x + 3 + len(label)
         field_w = max(10, modal_w - len(label) - 6)
 
-        display_text = self.edit_buffer
-        if len(display_text) > field_w:
-            display_text = display_text[-(field_w - 1):]
+        display_text, cursor_in_field = self._field_view(self.edit_buffer, self.edit_cursor_pos, field_w)
 
         try:
             stdscr.addstr(modal_y + 2, modal_x + 3, label, curses.color_pair(10) | curses.A_BOLD)
             field_attr = curses.color_pair(7)  # Highlighted cyan background
-            padded_text = display_text.ljust(field_w)
-            stdscr.addstr(modal_y + 2, field_x, padded_text[:field_w], field_attr)
+            stdscr.addstr(modal_y + 2, field_x, self._fit_text(display_text, field_w, pad=True), field_attr)
 
             # Draw cursor
-            cursor_disp_x = field_x + min(self.edit_cursor_pos, field_w - 1)
+            cursor_disp_x = field_x + cursor_in_field
             char_under = ' ' if self.edit_cursor_pos >= len(self.edit_buffer) else self.edit_buffer[self.edit_cursor_pos]
+            if self._cell_width(char_under) > field_w - cursor_in_field:
+                char_under = ' '
             stdscr.addch(modal_y + 2, cursor_disp_x, char_under, curses.A_REVERSE | curses.A_BLINK)
 
             hints = "Enter: Save changes  |  Esc: Cancel  |  Ctrl-u: Clear"
@@ -1212,13 +1315,13 @@ class VLoggerTUI:
                 self.edit_buffer = left[:idx + 1] + self.edit_buffer[self.edit_cursor_pos:]
                 self.edit_cursor_pos = idx + 1
 
-        elif 32 <= ch <= 126:  # Printable character
-            char = chr(ch)
+        elif (isinstance(ch, str) and ch.isprintable()) or (isinstance(ch, int) and 32 <= ch <= 255 and chr(ch).isprintable()):
+            char = ch if isinstance(ch, str) else chr(ch)
             self.edit_buffer = self.edit_buffer[:self.edit_cursor_pos] + char + self.edit_buffer[self.edit_cursor_pos:]
             self.edit_cursor_pos += 1
 
     def _render_pick_desc_modal(self, stdscr, max_y: int, max_x: int):
-        modal_w = min(68, max_x - 6)
+        modal_w = self._modal_width(68, max_x)
         modal_h = min(14, max_y - 4)
         modal_y = (max_y - modal_h) // 2
         modal_x = (max_x - modal_w) // 2
@@ -1270,7 +1373,7 @@ class VLoggerTUI:
                 row_y = modal_y + 2 + row_i
                 attr = curses.color_pair(7) | curses.A_BOLD if is_sel else curses.color_pair(10)
 
-                stdscr.addstr(row_y, modal_x + 2, line_str[:modal_w - 4].ljust(modal_w - 4), attr)
+                stdscr.addstr(row_y, modal_x + 2, self._fit_text(line_str, modal_w - 4, pad=True), attr)
 
             hints = "Enter: Choose  |  j/k or ↓/↑: Nav  |  Esc: Cancel"
             stdscr.addstr(modal_y + modal_h - 2, modal_x + (modal_w - len(hints)) // 2, hints, curses.color_pair(13) | curses.A_DIM)
@@ -1318,14 +1421,9 @@ class VLoggerTUI:
             return False
 
         elif ch in (ord('s'), ord(' ')):  # Toggle Start / Stop
-            if self.active_entry:
-                stopped = self.core.stop()
-                dur_str = TimeEntry.format_duration(stopped.calculate_duration())
-                self.set_status(f"Stopped: '{stopped.description}' ({dur_str})")
-            else:
-                desc = self.desc_buffer.strip() or self.default_desc
-                started = self.core.start(description=desc)
-                self.set_status(f"Started: '{started.description}'")
+            desc = self.desc_buffer.strip() or self.default_desc
+            result = self.core.toggle(description=desc)
+            self.set_status(result["message"])
 
         elif ch in (ord('\t'), ord('v'), ord('V'), ord('l'), ord('L'), curses.KEY_RIGHT):
             order = ["LOGS", "STATS", "WEEKLY", "MONTHLY"]
@@ -1440,10 +1538,12 @@ class VLoggerTUI:
             else:
                 self.set_status("Cannot rename summary row. Switch to Logs view (1) to edit.")
 
-        elif ch == ord('d'):  # Reset to default description (last used)
-            self.desc_buffer = self.default_desc
+        elif ch == ord('d'):  # Reset to the last used description
+            self.desc_buffer = self.db.get_last_description() or self.default_desc
             self.cursor_pos = len(self.desc_buffer)
-            self.set_status(f"Reset description to: '{self.default_desc}'")
+            if self.active_entry:
+                self.core.update_entry(self.active_entry.id, description=self.desc_buffer)
+            self.set_status(f"Reset description to: '{self.desc_buffer}'")
 
         elif ch == ord('D'):  # Set current as default description
             new_def = self.desc_buffer.strip()
@@ -1586,8 +1686,8 @@ class VLoggerTUI:
                 self.desc_buffer = left[:idx + 1] + self.desc_buffer[self.cursor_pos:]
                 self.cursor_pos = idx + 1
 
-        elif 32 <= ch <= 126:  # Printable ASCII characters
-            char = chr(ch)
+        elif (isinstance(ch, str) and ch.isprintable()) or (isinstance(ch, int) and 32 <= ch <= 255 and chr(ch).isprintable()):
+            char = ch if isinstance(ch, str) else chr(ch)
             self.desc_buffer = self.desc_buffer[:self.cursor_pos] + char + self.desc_buffer[self.cursor_pos:]
             self.cursor_pos += 1
 

@@ -8,6 +8,8 @@ rendering curses-style rounded boxes, colors, active tracker controls, tabbed vi
 import html
 import json
 import os
+import fcntl
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -17,6 +19,11 @@ from vlogger.models import TimeEntry
 from vlogger.core import VLoggerCore
 
 
+def _json_for_script(value: Any) -> str:
+    """Serialize data without allowing text to terminate the enclosing script tag."""
+    return json.dumps(value).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
 def generate_html_report(
     db: Database,
     title: str = "ekselek — vlogger",
@@ -24,21 +31,34 @@ def generate_html_report(
     weeks_limit: int = 26,
     months_limit: int = 12,
     read_only: bool = True,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    project: Optional[str] = None,
 ) -> str:
     """Generate a standalone HTML file that duplicates the curses TUI layout, styling, and feel."""
+    filtered = bool(since or until or project)
     active_entry = db.get_active_entry()
-    today_stats = db.get_stats_for_today()
-    daily_stats = db.get_daily_stats(days_limit=days_limit)
+    stats_entries = db._stats_entries(since=since, until=until, project=project)
+    daily_stats = db.get_daily_stats(days_limit=days_limit, since=since, until=until, project=project, entries_override=stats_entries)
+    if filtered:
+        filtered_entries = list(stats_entries)
+        filtered_entries.sort(key=lambda e: datetime.fromisoformat(e.start_time), reverse=True)
+        recent_entries = filtered_entries[:100]
+        active_entry = next((e for e in filtered_entries if e.is_active), None)
+        today_row = next((d for d in daily_stats if d["is_today"]), None)
+        today_stats = {"total_seconds": today_row["total_seconds"], "count": today_row["count"]} if today_row else {"total_seconds": 0, "count": 0}
+        last_desc = recent_entries[0].description if recent_entries else "Work"
+    else:
+        today_stats = db.get_stats_for_today(entries_override=stats_entries)
+        recent_entries = db.list_entries(limit=100)
+        last_desc = db.get_last_description() or db.get_setting("default_description", "Work")
     daily_summary = VLoggerCore.calculate_daily_summary(daily_stats)
 
-    weekly_stats = db.get_weekly_stats(weeks_limit=weeks_limit)
+    weekly_stats = db.get_weekly_stats(weeks_limit=weeks_limit, since=since, until=until, project=project, entries_override=stats_entries)
     weekly_summary = VLoggerCore.calculate_weekly_summary(weekly_stats)
 
-    monthly_stats = db.get_monthly_stats(months_limit=months_limit)
+    monthly_stats = db.get_monthly_stats(months_limit=months_limit, since=since, until=until, project=project, entries_override=stats_entries)
     monthly_summary = VLoggerCore.calculate_monthly_summary(monthly_stats)
-
-    recent_entries = db.list_entries(limit=100)
-    last_desc = db.get_last_description() or db.get_setting("default_description", "Work")
 
     now_dt = datetime.now().astimezone()
     now_str = now_dt.strftime("%d.%m.%Y %H:%M:%S")
@@ -78,57 +98,29 @@ def generate_html_report(
         except Exception:
             since_str = ""
         desc_val = active_entry.description
-        btn_toggle_html = '<span class="tui-btn-stop" onclick="simulateToggleTimer()"> [s: STOP] </span>'
     else:
         status_badge_html = '<span class="tui-badge-stopped"> ■ STOPPED </span>'
         elapsed_str = "00:00:00"
         since_str = ""
         desc_val = last_desc
-        btn_toggle_html = '<span class="tui-btn-start" onclick="simulateToggleTimer()"> [s: START] </span>'
 
-    if read_only:
-        row_3_html = '''<span class="tui-yellow bold">[ 🔒 READ-ONLY MONITOR ]</span>
+    # This is a static report with no write API, so its controls always describe a viewer.
+    # read_only still controls file permissions in write_html_report for API compatibility.
+    row_3_html = '''<span class="tui-yellow bold">[ 🔒 READ-ONLY MONITOR ]</span>
           <span class="tui-btn-action tui-cyan bold" onclick="cycleTuiView()">[h/l or Tab: Switch View (1-4)]</span>
           <span class="tui-btn-action tui-dim" onclick="window.location.reload()">[r: Refresh]</span>
           <span class="tui-btn-action tui-dim" onclick="toggleHelpModal()">[?: Shortcuts]</span>'''
-        mode_label = "-- READ-ONLY --"
-        footer_hints = "h / l or Tab: Switch Views (1-4) │ Enter: Details │ j / k: Navigate │ r: Reload │ ?: Shortcuts"
-        help_title = "Viewer Shortcuts & Help (Read-Only)"
-        help_lines = '''<div class="tui-help-line"><span class="tui-help-key">h / l or ←/→</span><span class="tui-help-desc">Switch between tabs (Logs, Daily, Weekly, Monthly)</span></div>
+    mode_label = "-- READ-ONLY --"
+    footer_hints = "h / l or Tab: Switch Views (1-4) │ Enter: Details │ j / k: Navigate │ r: Reload │ ?: Shortcuts"
+    help_title = "Viewer Shortcuts & Help (Read-Only)"
+    help_lines = '''<div class="tui-help-line"><span class="tui-help-key">h / l or ←/→</span><span class="tui-help-desc">Switch between tabs (Logs, Daily, Weekly, Monthly)</span></div>
           <div class="tui-help-line"><span class="tui-help-key">Tab or v</span><span class="tui-help-desc">Cycle through all 4 views (Shift+Tab to reverse)</span></div>
           <div class="tui-help-line"><span class="tui-help-key">1 / 2 / 3 / 4</span><span class="tui-help-desc">Direct jump to Logs (1), Daily (2), Weekly (3), Monthly (4)</span></div>
           <div class="tui-help-line"><span class="tui-help-key">j / k or ↓/↑</span><span class="tui-help-desc">Navigate entries or stats with cursor</span></div>
           <div class="tui-help-line"><span class="tui-help-key">Enter</span><span class="tui-help-desc">Open Details modal for selected entry, day, week, or month</span></div>
           <div class="tui-help-line"><span class="tui-help-key">g / G</span><span class="tui-help-desc">Jump to top / bottom of current list</span></div>
           <div class="tui-help-line"><span class="tui-help-key">r</span><span class="tui-help-desc">Reload / refresh latest progress from server</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">?</span><span class="tui-help-desc">Toggle this shortcuts & help dialog</span></div>
-          <div style="margin-top: 12px; padding: 8px 10px; background: rgba(86,182,194,0.12); border-left: 3px solid #56b6c2; font-size: 12px; color: #abb2bf;">
-            <strong style="color: #61afef;">💡 Vimium / SurfingKeys:</strong> Extension intercepts <code>j/k/h/l/r</code>. Press <code>i</code> (Vimium insert mode) or click the Vimium icon to exclude this URL.
-          </div>'''
-    else:
-        row_3_html = f'''<span id="tui-btn-toggle">{btn_toggle_html}</span>
-          <span class="tui-btn-action tui-cyan bold">[i: Edit]</span>
-          <span class="tui-btn-action tui-yellow bold">[p: Pick Past]</span>
-          <span class="tui-btn-action tui-dim">[d: Last Desc]</span>
-          <span class="tui-btn-action tui-dim" onclick="toggleHelpModal()">[?: Help]</span>'''
-        mode_label = "-- NORMAL --"
-        footer_hints = "Tab: Cycle Views (1-4) | s: Start/Stop | i: Edit | p: Pick | y: Yank | ?: Help | q: Quit"
-        help_title = "Help & Vim Bindings"
-        help_lines = '''<div class="tui-help-line"><span class="tui-help-key">Tab or v</span><span class="tui-help-desc">Cycle between Logs, Daily, Weekly, and Monthly views</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">1 / 2 / 3 / 4</span><span class="tui-help-desc">Switch directly to Logs (1), Daily (2), Weekly (3), Monthly (4)</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">s or Space</span><span class="tui-help-desc">Toggle Start / Stop timer</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">i or a</span><span class="tui-help-desc">Insert mode: Edit active tracker description</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">p</span><span class="tui-help-desc">Pick from list of unique past tasks</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">y</span><span class="tui-help-desc">Yank highlighted history/task to active tracker</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">e or Enter</span><span class="tui-help-desc">Edit selected log entry / View details modal</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">d</span><span class="tui-help-desc">Reset active description to last used task</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">D</span><span class="tui-help-desc">Save current active description as new default</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">j / k or ↓/↑</span><span class="tui-help-desc">Navigate history entries or stats</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">g / G</span><span class="tui-help-desc">Jump to top / bottom of current list</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">x</span><span class="tui-help-desc">Delete selected history entry (with confirm)</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">r</span><span class="tui-help-desc">Refresh data from database</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">q</span><span class="tui-help-desc">Quit TUI (active timer continues in background)</span></div>
-          <div class="tui-help-line"><span class="tui-help-key">?</span><span class="tui-help-desc">Toggle this help modal</span></div>'''
+          <div class="tui-help-line"><span class="tui-help-key">?</span><span class="tui-help-desc">Toggle this shortcuts & help dialog</span></div>'''
 
     # Pre-render Logs View Rows
     log_rows_html = []
@@ -672,6 +664,56 @@ def generate_html_report(
     }}
 
     @media (max-width: 620px) {{
+      .terminal-titlebar {{ gap: 12px; }}
+      .window-title, .tui-nav-hint {{ display: none; }}
+      .terminal-screen {{ padding: 16px 12px; }}
+      .main-panel-box {{ padding: 12px 10px; }}
+      .tui-tabs-bar {{
+        position: static;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 4px;
+        padding: 0 0 8px;
+        margin-bottom: 4px;
+      }}
+      .tui-tab-btn {{
+        border: 1px solid #27354a;
+        padding: 5px 2px;
+        font-size: 12px;
+        white-space: nowrap;
+      }}
+      .tui-tab-info {{
+        grid-column: 1 / -1;
+        padding-left: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }}
+      .tui-panel-content {{ margin-top: 0; }}
+      .tui-summary-stat-line {{ margin-top: 6px; }}
+      .tui-period-header {{ font-size: 0; }}
+      .tui-period-header::after {{
+        content: attr(data-compact);
+        font-size: 12px;
+        white-space: pre;
+      }}
+      .tui-table-row:not(.tui-log-grid) {{
+        display: grid;
+        grid-template-columns: 1.5ch 90px 78px minmax(0, 1fr);
+        column-gap: 4px;
+      }}
+      .tui-table-row:not(.tui-log-grid) > span {{
+        width: auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }}
+      .tui-table-row:not(.tui-log-grid) > .tui-cell-day,
+      .tui-table-row:not(.tui-log-grid) > .tui-cell-range,
+      .tui-table-row:not(.tui-log-grid) > .tui-cell-cnt,
+      .tui-table-row:not(.tui-log-grid) > .tui-cell-bar {{ display: none; }}
+      .tui-breakdown-item {{ overflow-wrap: anywhere; }}
       .tui-log-grid {{ grid-template-columns: 2ch 11ch 10ch minmax(0, 1fr); }}
       .tui-log-grid > span:nth-child(2),
       .tui-log-grid > span:nth-child(4) {{ display: none; }}
@@ -907,7 +949,7 @@ def generate_html_report(
           <div id="tui-view-stats" style="display: none;">
             <div class="tui-summary-stat-line">  Total: {total_compact} across {active_days_cnt} active days  │  Daily Avg: {avg_compact}  │  Peak: {peak_day_str} ({peak_compact})</div>
             <div class="tui-divider">──────────────────────────────────────────────────────────────────────────────────</div>
-            <div class="tui-table-header">  DATE         DAY        DURATION   ENTRIES  BAR          TOP TASKS</div>
+            <div class="tui-table-header tui-period-header" data-compact="  DATE          DURATION  TOP TASK">  DATE         DAY        DURATION   ENTRIES  BAR          TOP TASKS</div>
             <div class="tui-rows-scrollbox" id="statsScrollbox">
               {"".join(daily_rows_html)}
             </div>
@@ -921,7 +963,7 @@ def generate_html_report(
           <div id="tui-view-weekly" style="display: none;">
             <div class="tui-summary-stat-line">  Total: {weekly_total_compact} across {active_weeks_cnt} active weeks  │  Weekly Avg: {weekly_avg_compact}  │  Peak: {peak_week_str} ({peak_week_compact})</div>
             <div class="tui-divider">──────────────────────────────────────────────────────────────────────────────────</div>
-            <div class="tui-table-header">  WEEK           DATES                 DURATION   ENTRIES  BAR          TOP TASKS</div>
+            <div class="tui-table-header tui-period-header" data-compact="  WEEK          DURATION  TOP TASK">  WEEK           DATES                 DURATION   ENTRIES  BAR          TOP TASKS</div>
             <div class="tui-rows-scrollbox" id="weeklyScrollbox">
               {"".join(weekly_rows_html)}
             </div>
@@ -935,7 +977,7 @@ def generate_html_report(
           <div id="tui-view-monthly" style="display: none;">
             <div class="tui-summary-stat-line">  Total: {monthly_total_compact} across {active_months_cnt} active months  │  Monthly Avg: {monthly_avg_compact}  │  Peak: {peak_month_str} ({peak_month_compact})</div>
             <div class="tui-divider">──────────────────────────────────────────────────────────────────────────────────</div>
-            <div class="tui-table-header">  MONTH          PERIOD / ACTIVE DAYS  DURATION   ENTRIES  BAR          TOP TASKS</div>
+            <div class="tui-table-header tui-period-header" data-compact="  MONTH         DURATION  TOP TASK">  MONTH          PERIOD / ACTIVE DAYS  DURATION   ENTRIES  BAR          TOP TASKS</div>
             <div class="tui-rows-scrollbox" id="monthlyScrollbox">
               {"".join(monthly_rows_html)}
             </div>
@@ -977,10 +1019,10 @@ def generate_html_report(
   </div>
 
   <script>
-    const DAILY_DATA = {json.dumps(json_daily)};
-    const WEEKLY_DATA = {json.dumps(json_weekly)};
-    const MONTHLY_DATA = {json.dumps(json_monthly)};
-    const LOGS_DATA = {json.dumps(json_entries)};
+    const DAILY_DATA = {_json_for_script(json_daily)};
+    const WEEKLY_DATA = {_json_for_script(json_weekly)};
+    const MONTHLY_DATA = {_json_for_script(json_monthly)};
+    const LOGS_DATA = {_json_for_script(json_entries)};
     const IS_ACTIVE = {json.dumps(is_running)};
     const ACTIVE_START_EPOCH = {active_epoch_ms};
     const TODAY_INFO = "── (Today: {today_dur_str} in {today_stats['count']} entries)";
@@ -1662,21 +1704,26 @@ def write_html_report(
             target_path = db.db_path.parent / "ekselek.html"
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    content = generate_html_report(
-        db,
-        title=title,
-        days_limit=days_limit,
-        weeks_limit=weeks_limit,
-        months_limit=months_limit,
-        read_only=read_only,
-    )
-
-    tmp_path = target_path.with_name(f".{target_path.name}.tmp.{os.getpid()}")
-    tmp_path.write_text(content, encoding="utf-8")
-    if read_only:
+    lock_path = target_path.with_name(f".{target_path.name}.lock")
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        # Generate after acquiring the lock so an older request cannot replace a
+        # newer snapshot when two timer commands finish close together.
+        content = generate_html_report(
+            db,
+            title=title,
+            days_limit=days_limit,
+            weeks_limit=weeks_limit,
+            months_limit=months_limit,
+            read_only=read_only,
+        )
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{target_path.name}.tmp.", dir=target_path.parent)
+        tmp_path = Path(tmp_name)
         try:
-            os.chmod(tmp_path, 0o444)
-        except Exception:
-            pass
-    os.replace(tmp_path, target_path)
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
+                output.write(content)
+            os.chmod(tmp_path, 0o444 if read_only else 0o644)
+            os.replace(tmp_path, target_path)
+        finally:
+            tmp_path.unlink(missing_ok=True)
     return target_path

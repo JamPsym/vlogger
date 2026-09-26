@@ -7,9 +7,9 @@
 
 ## Features
 
-- **Keyboard-First Vim Workflow**: Interactive curses TUI inside Kitty terminal with modal Vim controls (`s` to toggle, `i` to edit description, `j`/`k` to navigate history, `x` to delete, `d` to reset default).
-- **Persistent SQLite Engine**: Stored in `~/.local/share/vlogger/vlogger.db` with WAL mode enabled for concurrent reads/writes without locks.
-- **Auto-Generated Static HTML Dashboard**: Automatically refreshed after each task completion to `~/.local/share/vlogger/progress.html`. Self-contained with pure CSS & SVG (zero external CDNs or network requests), responsive dark theme, daily stats, visual activity bar chart, live log filter, and print-to-PDF support.
+- **Keyboard-First Vim Workflow**: Interactive curses TUI inside Kitty terminal with modal Vim controls (`s` to toggle, `i` to edit description, `j`/`k` to navigate history, `x` to delete, `d` to recall the last task).
+- **Persistent SQLite Engine**: Stored in `~/.local/share/vlogger/vlogger.db` with WAL mode for concurrent reads and serialized writes.
+- **Auto-Generated Static HTML Dashboard**: Refreshed after timer and entry changes at `~/.local/share/vlogger/ekselek.html`. Self-contained, responsive, and read-only, with logs, daily/weekly/monthly summaries, and print styles.
 - **Future-Proof Clean Export**: Export your logs at any time to **JSON**, **JSONL (Lines)**, **CSV**, or **HTML** with standard ISO 8601 timestamps, duration in seconds, project labels, and tags.
 - **Hyprland & Waybar Native**:
   - Launch as a floating Kitty scratchpad (`kitty --class vlogger -e vlogger`).
@@ -221,7 +221,7 @@ vlogger report --open
 
 > **Automatic Generation & Read-Only Permissions**:
 > The HTML dashboard (`~/.local/share/vlogger/ekselek.html`) regenerates automatically every time any action is taken (`start`, `stop`, `toggle`, manual `add`, rename/edit, or deletion).
-> - Written atomically with **read-only permissions** (`chmod 444` / `r--r--r--`), making it tamper-proof and safe for public hosting.
+> - Written atomically with **read-only file permissions** (`chmod 444` / `r--r--r--`). Anyone who can access a hosted copy can read the task descriptions and project names.
 > - Displayed as a clean **`[ 🔒 READ-ONLY MONITOR ]`** with viewer shortcuts (<kbd>Tab</kbd>, <kbd>1</kbd>, <kbd>2</kbd>, <kbd>j</kbd>/<kbd>k</kbd>, <kbd>Enter</kbd> for day details, <kbd>r</kbd> to reload).
 > - Active task displays `● RUNNING` in green with a live JavaScript ticking timer.
 > - Automatically detects file updates on disk and reloads seamlessly when hosted over HTTP.
@@ -277,6 +277,9 @@ vlogger export --since 2026-09-01 --out sept_work.csv
 
 # Export by project
 vlogger export --project backend --format json
+
+# HTML exports apply the same date and project filters
+vlogger export --project backend --format html --out backend.html
 ```
 
 ---
@@ -326,6 +329,8 @@ vlogger config set default_description "Deep Work"
 # Get current default description
 vlogger config get default_description
 ```
+
+Until you set a default explicitly, a new timer reuses the most recent task description. Once set, `default_description` takes precedence; the TUI's `d` key still recalls the last used task.
 
 ---
 

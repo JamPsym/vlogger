@@ -3,7 +3,7 @@
 import os
 import sqlite3
 from pathlib import Path
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from typing import Optional, List, Dict, Any
 
 from vlogger.models import TimeEntry
@@ -85,6 +85,29 @@ class Database:
                 cursor.execute(
                     "INSERT INTO settings (key, value) VALUES ('auto_generate_html', 'true')"
                 )
+
+            # Older versions could leave several timers active after concurrent starts.
+            # Close the older ones at the newest timer's start before enforcing the invariant.
+            active_rows = conn.execute(
+                "SELECT id, start_time FROM entries WHERE end_time IS NULL"
+            ).fetchall()
+            active_rows = sorted(
+                active_rows,
+                key=lambda row: (datetime.fromisoformat(row["start_time"]).astimezone(), row["id"]),
+                reverse=True,
+            )
+            if len(active_rows) > 1:
+                newest_start = active_rows[0]["start_time"]
+                newest_dt = datetime.fromisoformat(newest_start).astimezone()
+                for row in active_rows[1:]:
+                    duration = max(0, int((newest_dt - datetime.fromisoformat(row["start_time"]).astimezone()).total_seconds()))
+                    conn.execute(
+                        "UPDATE entries SET end_time = ?, duration_seconds = ?, updated_at = ? WHERE id = ?",
+                        (newest_start, duration, newest_start, row["id"]),
+                    )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_one_active ON entries((1)) WHERE end_time IS NULL"
+            )
             conn.commit()
 
     @staticmethod
@@ -116,6 +139,11 @@ class Database:
                 "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
+            if key == "default_description":
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES ('default_description_explicit', 'true') "
+                    "ON CONFLICT(key) DO UPDATE SET value = 'true'"
+                )
             conn.commit()
 
     def get_active_entry(self) -> Optional[TimeEntry]:
@@ -123,7 +151,7 @@ class Database:
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute(
-                "SELECT * FROM entries WHERE end_time IS NULL ORDER BY start_time DESC LIMIT 1"
+                "SELECT * FROM entries WHERE end_time IS NULL ORDER BY julianday(start_time) DESC, id DESC LIMIT 1"
             )
             row = cur.fetchone()
             return self._row_to_entry(row) if row else None
@@ -135,16 +163,21 @@ class Database:
         tags: Optional[List[str]] = None,
         start_dt: Optional[datetime] = None,
     ) -> TimeEntry:
-        """Start a new timer entry. If one is already active, stop it first."""
-        active = self.get_active_entry()
-        if active:
-            self.stop_timer(end_dt=start_dt)
-
-        now_str = (start_dt or datetime.now().astimezone()).isoformat()
+        """Atomically stop the old timer and start a new one."""
         proj = project or self.get_setting("default_project", "default")
         tags_str = ",".join(tags) if tags else ""
 
         with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now_dt = (start_dt or datetime.now().astimezone()).astimezone()
+            now_str = now_dt.isoformat()
+            active_rows = conn.execute("SELECT id, start_time FROM entries WHERE end_time IS NULL").fetchall()
+            for active in active_rows:
+                duration = max(0, int((now_dt - datetime.fromisoformat(active["start_time"]).astimezone()).total_seconds()))
+                conn.execute(
+                    "UPDATE entries SET end_time = ?, duration_seconds = ?, updated_at = ? WHERE id = ?",
+                    (now_str, duration, now_str, active["id"]),
+                )
             cur = conn.cursor()
             cur.execute(
                 """
@@ -155,32 +188,58 @@ class Database:
             )
             conn.commit()
             entry_id = cur.lastrowid
-            return self.get_entry(entry_id)
+            return self._row_to_entry(conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone())
 
     def stop_timer(self, end_dt: Optional[datetime] = None) -> Optional[TimeEntry]:
         """Stop the currently active timer."""
-        active = self.get_active_entry()
-        if not active:
-            return None
-
-        stop_time = end_dt or datetime.now().astimezone()
-        stop_time_str = stop_time.isoformat()
-        
-        # Calculate duration
-        start_time = datetime.fromisoformat(active.start_time)
-        duration = max(0, int((stop_time - start_time).total_seconds()))
-
         with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                "SELECT * FROM entries WHERE end_time IS NULL ORDER BY julianday(start_time) DESC, id DESC LIMIT 1"
+            ).fetchone()
+            if not active:
+                return None
+            stop_time = (end_dt or datetime.now().astimezone()).astimezone()
+            stop_time_str = stop_time.isoformat()
+            duration = max(0, int((stop_time - datetime.fromisoformat(active["start_time"]).astimezone()).total_seconds()))
             conn.execute(
                 """
                 UPDATE entries
                 SET end_time = ?, duration_seconds = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (stop_time_str, duration, stop_time_str, active.id),
+                (stop_time_str, duration, stop_time_str, active["id"]),
             )
             conn.commit()
-        return self.get_entry(active.id)
+            return self._row_to_entry(conn.execute("SELECT * FROM entries WHERE id = ?", (active["id"],)).fetchone())
+
+    def toggle_timer(self, description: str, project: Optional[str] = None) -> tuple[str, TimeEntry]:
+        """Toggle under one write lock, including concurrent hotkey presses."""
+        proj = project or self.get_setting("default_project", "default")
+        with self.get_connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            now_dt = datetime.now().astimezone()
+            now_str = now_dt.isoformat()
+            active = conn.execute(
+                "SELECT * FROM entries WHERE end_time IS NULL ORDER BY julianday(start_time) DESC, id DESC LIMIT 1"
+            ).fetchone()
+            if active:
+                duration = max(0, int((now_dt - datetime.fromisoformat(active["start_time"]).astimezone()).total_seconds()))
+                conn.execute(
+                    "UPDATE entries SET end_time = ?, duration_seconds = ?, updated_at = ? WHERE id = ?",
+                    (now_str, duration, now_str, active["id"]),
+                )
+                entry_id = active["id"]
+                action = "stopped"
+            else:
+                entry_id = conn.execute(
+                    "INSERT INTO entries(description, project, tags, start_time, created_at, updated_at) VALUES (?, ?, '', ?, ?, ?)",
+                    (description.strip(), proj, now_str, now_str, now_str),
+                ).lastrowid
+                action = "started"
+            conn.commit()
+            entry = self._row_to_entry(conn.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone())
+        return action, entry
 
     def add_manual_entry(
         self,
@@ -192,6 +251,12 @@ class Database:
         tags: Optional[List[str]] = None,
     ) -> TimeEntry:
         """Add an already completed time entry."""
+        if duration_seconds < 0:
+            raise ValueError("Duration must be non-negative")
+        if start_dt:
+            start_dt = start_dt.astimezone()
+        if end_dt:
+            end_dt = end_dt.astimezone()
         if end_dt and not start_dt:
             start_time = datetime.fromtimestamp(end_dt.timestamp() - duration_seconds, tz=end_dt.tzinfo)
             stop_time = end_dt
@@ -205,6 +270,9 @@ class Database:
         else:
             stop_time = datetime.now().astimezone()
             start_time = datetime.fromtimestamp(stop_time.timestamp() - duration_seconds, tz=stop_time.tzinfo)
+
+        start_time = start_time.astimezone()
+        stop_time = stop_time.astimezone()
 
         now_str = datetime.now().astimezone().isoformat()
         proj = project or self.get_setting("default_project", "default")
@@ -283,9 +351,83 @@ class Database:
             conn.commit()
             return cur.rowcount > 0
 
+    @staticmethod
+    def _filter_bound(value: Optional[str], end: bool = False) -> Optional[datetime]:
+        if not value:
+            return None
+        if len(value) == 10:
+            day = date.fromisoformat(value)
+            if end:
+                day += timedelta(days=1)
+            return datetime.combine(day, time.min).astimezone()
+        parsed = datetime.fromisoformat(value)
+        return parsed.astimezone()
+
+    def _includes_today(self, since: Optional[str], until: Optional[str], now: datetime) -> bool:
+        day_start = datetime.combine(now.date(), time.min).astimezone()
+        day_end = datetime.combine(now.date() + timedelta(days=1), time.min).astimezone()
+        lower = self._filter_bound(since)
+        upper = self._filter_bound(until, end=True)
+        return (lower is None or lower < day_end) and (upper is None or upper > day_start)
+
+    def _stats_entries(
+        self,
+        limit_entries: Optional[int] = None,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        project: Optional[str] = None,
+    ) -> List[TimeEntry]:
+        """Split sessions at local midnights, clipping to the requested period."""
+        lower = self._filter_bound(since)
+        upper = self._filter_bound(until, end=True)
+        now = datetime.now().astimezone()
+        portions: List[TimeEntry] = []
+        for entry in self.list_entries(limit=limit_entries, project=project):
+            start = datetime.fromisoformat(entry.start_time).astimezone()
+            end = datetime.fromisoformat(entry.end_time).astimezone() if entry.end_time else now
+            if end < start:
+                end = start
+            if lower and end <= lower:
+                continue
+            if upper and start >= upper:
+                continue
+            start = max(start, lower) if lower else start
+            end = min(end, upper) if upper else end
+
+            if start == end:
+                boundaries = [(start, end)]
+            else:
+                boundaries = []
+                cursor = start
+                while cursor < end:
+                    next_day = datetime.combine(cursor.date() + timedelta(days=1), time.min).astimezone()
+                    segment_end = min(end, next_day)
+                    boundaries.append((cursor, segment_end))
+                    cursor = segment_end
+
+            total_seconds = max(0, int((end.timestamp() - start.timestamp())))
+            assigned = 0
+            for index, (segment_start, segment_end) in enumerate(boundaries):
+                last = index == len(boundaries) - 1
+                seconds = total_seconds - assigned if last else max(0, int((segment_end.timestamp() - segment_start.timestamp())))
+                assigned += seconds
+                still_active = entry.is_active and last and segment_end == now
+                portions.append(TimeEntry(
+                    id=entry.id,
+                    description=entry.description,
+                    project=entry.project,
+                    tags=entry.tags,
+                    start_time=segment_start.isoformat(),
+                    end_time=None if still_active else segment_end.isoformat(),
+                    duration_seconds=None if still_active else seconds,
+                    created_at=entry.created_at,
+                    updated_at=entry.updated_at,
+                ))
+        return portions
+
     def list_entries(
         self,
-        limit: int = 50,
+        limit: Optional[int] = 50,
         offset: int = 0,
         since: Optional[str] = None,
         until: Optional[str] = None,
@@ -293,33 +435,53 @@ class Database:
     ) -> List[TimeEntry]:
         query = "SELECT * FROM entries WHERE 1=1"
         params: List[Any] = []
-
-        if since:
-            query += " AND start_time >= ?"
-            params.append(since)
-        if until:
-            query += " AND start_time <= ?"
-            params.append(until)
         if project:
             query += " AND project = ?"
             params.append(project)
 
-        query += " ORDER BY start_time DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
+        # ISO strings with different UTC offsets do not sort chronologically.
+        # Filter and sort parsed instants when a date window is requested.
+        if since or until:
+            lower = self._filter_bound(since)
+            upper = self._filter_bound(until, end=True)
+            upper_inclusive = bool(until and len(until) != 10)
+            with self.get_connection() as conn:
+                rows = conn.execute(query, params).fetchall()
+            entries = [self._row_to_entry(row) for row in rows]
+            def started_at(entry: TimeEntry) -> datetime:
+                return datetime.fromisoformat(entry.start_time).astimezone()
+            entries = [
+                entry for entry in entries
+                if (lower is None or started_at(entry) >= lower)
+                and (upper is None or (started_at(entry) <= upper if upper_inclusive else started_at(entry) < upper))
+            ]
+            entries.sort(key=started_at, reverse=True)
+            return entries[offset:offset + limit] if limit is not None else entries[offset:]
+
+        query += " ORDER BY julianday(start_time) DESC, id DESC"
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        elif offset:
+            query += " LIMIT -1 OFFSET ?"
+            params.append(offset)
 
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute(query, params)
             return [self._row_to_entry(row) for row in cur.fetchall()]
 
-    def get_stats_for_today(self) -> Dict[str, Any]:
+    def get_stats_for_today(self, entries_override: Optional[List[TimeEntry]] = None) -> Dict[str, Any]:
         """Compute total seconds and entry count for today."""
         today_prefix = datetime.now().astimezone().strftime("%Y-%m-%d")
-        entries = self.list_entries(limit=500, since=f"{today_prefix}T00:00:00")
+        if entries_override is None:
+            entries = self._stats_entries(since=today_prefix, until=today_prefix)
+        else:
+            entries = [e for e in entries_override if e.start_time[:10] == today_prefix]
         total_sec = sum(e.calculate_duration() for e in entries)
         return {
             "total_seconds": total_sec,
-            "count": len(entries),
+            "count": len({e.id for e in entries}),
             "date": today_prefix,
         }
 
@@ -330,7 +492,7 @@ class Database:
             cur.execute("""
                 SELECT description FROM entries
                 WHERE trim(description) != ''
-                ORDER BY start_time DESC LIMIT 1
+                ORDER BY julianday(start_time) DESC, id DESC LIMIT 1
             """)
             row = cur.fetchone()
             return row["description"] if row else None
@@ -340,11 +502,20 @@ class Database:
         with self.get_connection() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT description, MAX(start_time) as last_used, COUNT(*) as count
-                FROM entries
-                WHERE trim(description) != ''
-                GROUP BY description
-                ORDER BY MAX(start_time) DESC
+                WITH ranked AS (
+                    SELECT description, start_time,
+                           COUNT(*) OVER (PARTITION BY description) AS count,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY description
+                               ORDER BY julianday(start_time) DESC, id DESC
+                           ) AS recent_rank
+                    FROM entries
+                    WHERE trim(description) != ''
+                )
+                SELECT description, start_time AS last_used, count
+                FROM ranked
+                WHERE recent_rank = 1
+                ORDER BY julianday(start_time) DESC
                 LIMIT ?
             """, (limit,))
             rows = cur.fetchall()
@@ -360,17 +531,18 @@ class Database:
     def get_daily_stats(
         self,
         days_limit: int = 30,
-        limit_entries: int = 3000,
+        limit_entries: Optional[int] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
         project: Optional[str] = None,
         include_today: bool = True,
+        entries_override: Optional[List[TimeEntry]] = None,
     ) -> List[Dict[str, Any]]:
         """Return aggregated statistics grouped by day (YYYY-MM-DD), ordered newest first."""
         from datetime import timedelta
 
-        entries = self.list_entries(
-            limit=limit_entries,
+        entries = entries_override if entries_override is not None else self._stats_entries(
+            limit_entries=limit_entries,
             since=since,
             until=until,
             project=project,
@@ -397,7 +569,7 @@ class Database:
 
         # Optionally include today if no entries exist for today and not filtering by past until
         if include_today and today_str not in grouped:
-            if not until or until >= today_str:
+            if self._includes_today(since, until, now_local):
                 grouped[today_str] = []
 
         # Sort dates descending (newest first)
@@ -468,17 +640,18 @@ class Database:
     def get_weekly_stats(
         self,
         weeks_limit: int = 26,
-        limit_entries: int = 3000,
+        limit_entries: Optional[int] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
         project: Optional[str] = None,
         include_current_week: bool = True,
+        entries_override: Optional[List[TimeEntry]] = None,
     ) -> List[Dict[str, Any]]:
         """Return aggregated statistics grouped by ISO week (YYYY-Www), ordered newest first."""
         from datetime import timedelta
 
-        entries = self.list_entries(
-            limit=limit_entries,
+        entries = entries_override if entries_override is not None else self._stats_entries(
+            limit_entries=limit_entries,
             since=since,
             until=until,
             project=project,
@@ -515,7 +688,7 @@ class Database:
 
         # Include current week if needed
         if include_current_week and cur_week_str not in grouped:
-            if not until or until >= today_date.strftime("%Y-%m-%d"):
+            if self._includes_today(since, until, now_local):
                 grouped[cur_week_str] = []
 
         # Sort weeks descending (newest first)
@@ -633,18 +806,19 @@ class Database:
     def get_monthly_stats(
         self,
         months_limit: int = 12,
-        limit_entries: int = 3000,
+        limit_entries: Optional[int] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
         project: Optional[str] = None,
         include_current_month: bool = True,
+        entries_override: Optional[List[TimeEntry]] = None,
     ) -> List[Dict[str, Any]]:
         """Return aggregated statistics grouped by month (YYYY-MM), ordered newest first."""
         import calendar
         from datetime import timedelta, date
 
-        entries = self.list_entries(
-            limit=limit_entries,
+        entries = entries_override if entries_override is not None else self._stats_entries(
+            limit_entries=limit_entries,
             since=since,
             until=until,
             project=project,
@@ -674,7 +848,7 @@ class Database:
 
         # Include current month if needed
         if include_current_month and cur_month_str not in grouped:
-            if not until or until >= today_date.strftime("%Y-%m-%d"):
+            if self._includes_today(since, until, now_local):
                 grouped[cur_month_str] = []
 
         # Sort months descending (newest first)
@@ -805,4 +979,3 @@ class Database:
             })
 
         return result
-

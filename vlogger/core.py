@@ -1,6 +1,8 @@
-import atexit
 import os
 import re
+import shlex
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -8,18 +10,6 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from vlogger.db import Database
 from vlogger.models import TimeEntry
-
-_ACTIVE_SYNC_THREADS: List[threading.Thread] = []
-
-
-def _cleanup_sync_threads(timeout: float = 3.0) -> None:
-    for t in list(_ACTIVE_SYNC_THREADS):
-        if t.is_alive():
-            t.join(timeout=timeout)
-
-
-atexit.register(_cleanup_sync_threads)
-
 
 def parse_duration(duration_str: str) -> int:
     """Parse string representations like '45m', '1h30m', '2.5h', '90s', '1h 15m' into seconds."""
@@ -36,11 +26,11 @@ def parse_duration(duration_str: str) -> int:
         return int(float(m_dec.group(1)) * 3600)
 
     # General pattern for sequences of (\d+)([hms])
-    tokens = re.findall(r"(\d+)\s*([hms])", s)
-    if not tokens:
+    if not re.fullmatch(r"(?:\d+\s*[hms]\s*)+", s):
         raise ValueError(
             f"Cannot parse duration '{duration_str}'. Use formats like '45m', '1h30m', '2h', or '90s'."
         )
+    tokens = re.findall(r"(\d+)\s*([hms])", s)
 
     total_seconds = 0
     for val, unit in tokens:
@@ -61,10 +51,13 @@ class VLoggerCore:
 
     @property
     def default_description(self) -> str:
+        configured = self.db.get_setting("default_description", "Work")
+        if self.db.get_setting("default_description_explicit") == "true" and configured:
+            return configured
         last = self.db.get_last_description()
         if last:
             return last
-        return self.db.get_setting("default_description", "Work")
+        return configured
 
     @default_description.setter
     def default_description(self, val: str) -> None:
@@ -120,34 +113,14 @@ class VLoggerCore:
         except Exception:
             pass
 
-    def _run_sync_worker(self, target_path: Path, cmd_formatted: str) -> None:
-        current_thread = threading.current_thread()
-        try:
-            import subprocess
-            res = subprocess.run(
-                ["sh", "-c", cmd_formatted],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=30.0,
-                text=True,
-            )
-            if res.returncode != 0:
-                err = res.stderr.strip() or res.stdout.strip() or f"exit code {res.returncode}"
-                self._log_sync_error(err)
-        except Exception as ex:
-            self._log_sync_error(str(ex))
-        finally:
-            if current_thread in _ACTIVE_SYNC_THREADS:
-                try:
-                    _ACTIVE_SYNC_THREADS.remove(current_thread)
-                except ValueError:
-                    pass
-
     def wait_for_sync(self, timeout: float = 3.0) -> None:
         """Wait for any background sync operation to complete."""
-        t = getattr(self, "_active_sync_thread", None)
-        if t and t.is_alive():
-            t.join(timeout=timeout)
+        process = getattr(self, "_active_sync_process", None)
+        if process and process.poll() is None:
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                pass
 
     def sync_html_report(
         self,
@@ -162,9 +135,9 @@ class VLoggerCore:
             return False, "No 'html_sync_cmd' configured in settings."
 
         target_path = path or self.html_report_path
-        cmd_formatted = cmd.replace("{file}", str(target_path)).replace("{path}", str(target_path))
+        quoted_path = shlex.quote(str(target_path))
+        cmd_formatted = cmd.replace("{file}", quoted_path).replace("{path}", quoted_path)
         try:
-            import subprocess
             if wait:
                 res = subprocess.run(
                     ["sh", "-c", cmd_formatted],
@@ -180,14 +153,19 @@ class VLoggerCore:
                     self._log_sync_error(err)
                     return False, f"Sync command failed: {err}"
             else:
-                t = threading.Thread(
-                    target=self._run_sync_worker,
-                    args=(target_path, cmd_formatted),
-                    daemon=False,
+                env = os.environ.copy()
+                package_root = str(Path(__file__).resolve().parent.parent)
+                env["PYTHONPATH"] = os.pathsep.join(filter(None, (package_root, env.get("PYTHONPATH"))))
+                process = subprocess.Popen(
+                    [sys.executable, "-m", "vlogger.sync_worker", str(self.db.db_path), str(target_path)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    env=env,
                 )
-                _ACTIVE_SYNC_THREADS.append(t)
-                self._active_sync_thread = t
-                t.start()
+                self._active_sync_process = process
+                threading.Thread(target=process.wait, daemon=True).start()
                 return True, "Sync command started in background."
         except Exception as ex:
             self._log_sync_error(str(ex))
@@ -241,20 +219,20 @@ class VLoggerCore:
         project: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Toggles timer on/off. Useful for single Hyprland keybind or waybar click."""
-        active = self.db.get_active_entry()
-        if active:
-            stopped = self.stop()
+        desc = description.strip() if description and description.strip() else self.default_description
+        action, entry = self.db.toggle_timer(desc, project=project)
+        self.generate_html_report_safe()
+        if action == "stopped":
             return {
                 "action": "stopped",
-                "entry": stopped,
-                "message": f"Stopped: '{stopped.description}' ({TimeEntry.format_duration(stopped.calculate_duration())})"
+                "entry": entry,
+                "message": f"Stopped: '{entry.description}' ({TimeEntry.format_duration(entry.calculate_duration())})"
             }
         else:
-            started = self.start(description=description, project=project)
             return {
                 "action": "started",
-                "entry": started,
-                "message": f"Started: '{started.description}'"
+                "entry": entry,
+                "message": f"Started: '{entry.description}'"
             }
 
     def add_manual(
@@ -341,7 +319,7 @@ class VLoggerCore:
     def calculate_daily_summary(daily_stats: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Compute aggregate summary metrics across daily stats."""
         total_sec = sum(d["total_seconds"] for d in daily_stats)
-        total_cnt = sum(d["count"] for d in daily_stats)
+        total_cnt = len({e.id for d in daily_stats for e in d.get("entries", [])})
         active_days = [d for d in daily_stats if d["total_seconds"] > 0 or d["count"] > 0]
         active_days_cnt = len(active_days)
 
@@ -388,7 +366,7 @@ class VLoggerCore:
     def calculate_weekly_summary(weekly_stats: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Compute aggregate summary metrics across weekly stats."""
         total_sec = sum(w["total_seconds"] for w in weekly_stats)
-        total_cnt = sum(w["count"] for w in weekly_stats)
+        total_cnt = len({e.id for w in weekly_stats for e in w.get("entries", [])})
         active_weeks = [w for w in weekly_stats if w["total_seconds"] > 0 or w["count"] > 0]
         active_weeks_cnt = len(active_weeks)
 
@@ -435,7 +413,7 @@ class VLoggerCore:
     def calculate_monthly_summary(monthly_stats: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Compute aggregate summary metrics across monthly stats."""
         total_sec = sum(m["total_seconds"] for m in monthly_stats)
-        total_cnt = sum(m["count"] for m in monthly_stats)
+        total_cnt = len({e.id for m in monthly_stats for e in m.get("entries", [])})
         active_months = [m for m in monthly_stats if m["total_seconds"] > 0 or m["count"] > 0]
         active_months_cnt = len(active_months)
 
@@ -477,4 +455,3 @@ class VLoggerCore:
         )
         summary = self.calculate_monthly_summary(months)
         return months, summary
-

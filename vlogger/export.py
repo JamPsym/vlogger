@@ -20,12 +20,15 @@ def export_entries(
     since: Optional[str] = None,
     until: Optional[str] = None,
     project: Optional[str] = None,
-    limit: int = 10000,
+    limit: Optional[int] = None,
 ) -> str:
     """Export entries matching filters in the given format ('json', 'jsonl', 'csv')."""
-    entries = db.list_entries(limit=limit, since=since, until=until, project=project)
-
     fmt_lower = fmt.lower().strip()
+    if fmt_lower == "html":
+        from vlogger.html_report import generate_html_report
+        return generate_html_report(db, since=since, until=until, project=project)
+
+    entries = db.list_entries(limit=limit, since=since, until=until, project=project)
     if fmt_lower == "json":
         data = [e.to_dict() for e in entries]
         return json.dumps(data, indent=2, ensure_ascii=False)
@@ -54,9 +57,6 @@ def export_entries(
             d["tags"] = ",".join(d["tags"])
             writer.writerow(d)
         return output.getvalue()
-    elif fmt_lower == "html":
-        from vlogger.html_report import generate_html_report
-        return generate_html_report(db)
     else:
         raise ValueError(f"Unsupported export format: {fmt}. Choose 'json', 'jsonl', 'csv', or 'html'.")
 
@@ -80,5 +80,6 @@ def export_to_file(
     target_path.write_text(content, encoding="utf-8")
     
     # Return count of exported lines / entries
-    entries = db.list_entries(limit=10000, since=since, until=until, project=project)
-    return len(entries)
+    if fmt.lower() == "html":
+        return len({e.id for e in db._stats_entries(since=since, until=until, project=project)})
+    return len(db.list_entries(limit=None, since=since, until=until, project=project))
